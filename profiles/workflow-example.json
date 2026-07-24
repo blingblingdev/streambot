@@ -1,0 +1,53 @@
+{
+  "name": "workflow-example",
+  "perception": {
+    "regions": [
+      {"name": "status", "x": 0, "y": 0, "width": 10, "height": 10}
+    ],
+    "predicates": [
+      {
+        "name": "ready_pixel",
+        "type": "pixel",
+        "region": "status",
+        "x": 0,
+        "y": 0,
+        "bgr": [0, 200, 0]
+      }
+    ],
+    "signals": [
+      {"name": "ready", "operator": "all", "predicates": ["ready_pixel"]}
+    ]
+  },
+  "actions": [
+    {
+      "name": "activate",
+      "type": "mouse_button",
+      "button": "left",
+      "operation": "click"
+    }
+  ],
+  "workflow": {
+    "initial_state": "waiting",
+    "event_history_limit": 100,
+    "states": [
+      {
+        "name": "waiting",
+        "timeout_seconds": 30,
+        "timeout_state": "failed",
+        "transitions": [
+          {
+            "name": "activate",
+            "signal": "ready",
+            "target": "completed",
+            "actions": ["activate"],
+            "idempotency_key": "activate-ready",
+            "max_retries": 2,
+            "failure_state": "failed"
+          }
+        ]
+      },
+      {"name": "completed", "terminal": "success"},
+      {"name": "failed", "terminal": "failure"}
+    ]
+  }
+}

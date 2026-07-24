@@ -1,0 +1,27 @@
+{
+  "name": "observe",
+  "stream": {
+    "width": 1280,
+    "height": 720,
+    "fps": 15,
+    "bitrate_kbps": 4000,
+    "codec": "h264"
+  },
+  "observation": {
+    "sample_fps": 2,
+    "decoder": "videotoolbox",
+    "software_fallback": true
+  },
+  "safety": {
+    "preserve_existing_desktop": true,
+    "dry_run": true,
+    "max_actions_per_minute": 30
+  },
+  "runtime": {
+    "reconnect_initial_seconds": 1,
+    "reconnect_max_seconds": 30,
+    "max_reconnect_attempts": 5,
+    "liveness_timeout_seconds": 10,
+    "status_interval_seconds": 5
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "perception-example",
+  "perception": {
+    "regions": [
+      {
+        "name": "status",
+        "x": 0,
+        "y": 0,
+        "width": 100,
+        "height": 40
+      }
+    ],
+    "predicates": [
+      {
+        "name": "anchor",
+        "type": "pixel",
+        "region": "status",
+        "x": 5,
+        "y": 5,
+        "bgr": [0, 200, 0],
+        "tolerance": 10
+      },
+      {
+        "name": "background",
+        "type": "color",
+        "region": "status",
+        "bgr": [0, 200, 0],
+        "tolerance": 10,
+        "minimum_fraction": 0.8
+      },
+      {
+        "name": "shape",
+        "type": "template",
+        "region": "status",
+        "template": "status-template",
+        "threshold": 0.95
+      },
+      {
+        "name": "text",
+        "type": "ocr",
+        "region": "status",
+        "contains": "ready"
+      }
+    ],
+    "signals": [
+      {
+        "name": "ready",
+        "operator": "all",
+        "predicates": ["anchor", "background", "shape", "text"]
+      }
+    ]
+  }
+}

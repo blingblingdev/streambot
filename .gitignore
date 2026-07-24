@@ -1,0 +1,10 @@
+.venv/
+.state/
+.artifacts/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+.fixtures/
+jobs/*/pilot-log.jsonl
+jobs/*/flow-log.jsonl

@@ -1,0 +1,1135 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://streambot/scene-manifest.schema.json",
+  "title": "Scene Manifest",
+  "description": "Declarative per-target scene model executed by streambot.scene.SceneEngine: how each scene is recognized (detect), which controls it exposes (extractors), and which control is recommended. All coordinates may be absolute stream pixels or normalized fractions (the *_norm variants), so one manifest survives a stream-resolution change. There is no string escape hatch: every scene must declare an executable detect group.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target",
+    "scenes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scenes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/definitions/scene"
+      }
+    }
+  },
+  "definitions": {
+    "region": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "regionNorm": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "point": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "pointNorm": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "bgr": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "regionOwner": {
+      "type": "object",
+      "properties": {
+        "region": {
+          "$ref": "#/definitions/region"
+        },
+        "region_norm": {
+          "$ref": "#/definitions/regionNorm"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "region"
+          ]
+        },
+        {
+          "required": [
+            "region_norm"
+          ]
+        }
+      ]
+    },
+    "scene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "detect"
+      ],
+      "properties": {
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "detect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "predicates"
+          ],
+          "properties": {
+            "operator": {
+              "enum": [
+                "all",
+                "any",
+                "not"
+              ],
+              "default": "all"
+            },
+            "predicates": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/definitions/predicate"
+              }
+            }
+          }
+        },
+        "controls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/control"
+          },
+          "default": []
+        },
+        "recommend": {
+          "$ref": "#/definitions/recommend"
+        }
+      }
+    },
+    "predicate": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pixel",
+                    "color",
+                    "template",
+                    "ocr-contains",
+                    "ocr-locate",
+                    "temporal-flicker",
+                    "color-mask"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^x-[a-z0-9-]+$"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "pixel"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "bgr"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "x": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "y": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "x_norm": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "y_norm": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "bgr": {
+                    "$ref": "#/definitions/bgr"
+                  },
+                  "tolerance": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                },
+                "allOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "required": [
+                          "x"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "x_norm"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "oneOf": [
+                      {
+                        "required": [
+                          "y"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "y_norm"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "color"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "bgr",
+                  "minimum_fraction"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "bgr": {
+                    "$ref": "#/definitions/bgr"
+                  },
+                  "tolerance": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "minimum_fraction": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "color-mask"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "rules"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "rules": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "oneOf": [
+                        {
+                          "required": [
+                            "channel"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "channel": {
+                              "enum": [
+                                "b",
+                                "g",
+                                "r"
+                              ]
+                            },
+                            "gt": {
+                              "type": "number",
+                              "minimum": -255,
+                              "maximum": 255
+                            },
+                            "lt": {
+                              "type": "number",
+                              "minimum": -255,
+                              "maximum": 255
+                            }
+                          },
+                          "anyOf": [
+                            {
+                              "required": [
+                                "gt"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "lt"
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "required": [
+                            "diff"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "diff": {
+                              "type": "array",
+                              "items": {
+                                "enum": [
+                                  "b",
+                                  "g",
+                                  "r"
+                                ]
+                              },
+                              "minItems": 2,
+                              "maxItems": 2
+                            },
+                            "gt": {
+                              "type": "number",
+                              "minimum": -255,
+                              "maximum": 255
+                            },
+                            "lt": {
+                              "type": "number",
+                              "minimum": -255,
+                              "maximum": 255
+                            }
+                          },
+                          "anyOf": [
+                            {
+                              "required": [
+                                "gt"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "lt"
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "required": [
+                            "gray"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "gray": {
+                              "const": true
+                            },
+                            "gt": {
+                              "type": "number",
+                              "minimum": -255,
+                              "maximum": 255
+                            },
+                            "lt": {
+                              "type": "number",
+                              "minimum": -255,
+                              "maximum": 255
+                            }
+                          },
+                          "anyOf": [
+                            {
+                              "required": [
+                                "gt"
+                              ]
+                            },
+                            {
+                              "required": [
+                                "lt"
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "min_fraction": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "below_fraction": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "min_fraction"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "below_fraction"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "template"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "template",
+                  "threshold"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "template": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "threshold": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ocr-contains"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "contains"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "contains": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "case_sensitive": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "min_confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ocr-locate"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "match_any"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "match_any": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "case_sensitive": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "min_confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "temporal-flicker"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "kind",
+              "candidates"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "candidates": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "$ref": "#/definitions/temporalCandidate"
+                }
+              },
+              "camera_cut_threshold": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "baseline_samples": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16
+              },
+              "history_size": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 32
+              },
+              "ambiguity_margin": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "temporalCandidate": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/regionOwner"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "region": true,
+            "region_norm": true,
+            "click_point": {
+              "$ref": "#/definitions/point"
+            },
+            "click_point_norm": {
+              "$ref": "#/definitions/pointNorm"
+            },
+            "high_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "low_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "minimum_high_samples": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            }
+          }
+        }
+      ]
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "action_kind",
+        "extractor"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action_kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "extractor": {
+          "$ref": "#/definitions/extractor"
+        }
+      }
+    },
+    "extractor": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fixed-point",
+                    "each-point",
+                    "context-point",
+                    "color-blob",
+                    "template-grid",
+                    "ocr-line",
+                    "temporal-candidate"
+                  ]
+                },
+                {
+                  "type": "string",
+                  "pattern": "^x-[a-z0-9-]+$"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "fixed-point"
+              }
+            }
+          },
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "point": {
+                "$ref": "#/definitions/point"
+              },
+              "point_norm": {
+                "$ref": "#/definitions/pointNorm"
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "oneOf": [
+              {
+                "required": [
+                  "point"
+                ]
+              },
+              {
+                "required": [
+                  "point_norm"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "each-point",
+                  "context-point"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "kind",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "start_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "color-blob"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "bgr"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "bgr": {
+                    "$ref": "#/definitions/bgr"
+                  },
+                  "tolerance": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  },
+                  "min_area": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "order": {
+                    "enum": [
+                      "left-right",
+                      "top-bottom",
+                      "area-desc"
+                    ]
+                  },
+                  "max_candidates": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "template-grid"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind",
+                  "template",
+                  "threshold"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "template": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "threshold": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "max_candidates": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "min_distance": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ocr-line"
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/regionOwner"
+              },
+              {
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": true,
+                  "region": true,
+                  "region_norm": true,
+                  "match_any": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "case_sensitive": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "min_confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "max_candidates": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "temporal-candidate"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "recommend": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": [
+            "rule"
+          ],
+          "properties": {
+            "rule": {
+              "enum": [
+                "none",
+                "static-index",
+                "by-id",
+                "by-text",
+                "context"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rule": {
+                "const": "static-index"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule",
+              "index"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rule": true,
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rule": {
+                "const": "by-id"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule",
+              "id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rule": true,
+              "id": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rule": {
+                "const": "by-text"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule",
+              "text"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rule": true,
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "case_sensitive": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rule": {
+                "const": "context"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule",
+              "key"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rule": true,
+              "key": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rule": {
+                "const": "none"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "rule": true
+            }
+          }
+        }
+      ]
+    }
+  }
+}

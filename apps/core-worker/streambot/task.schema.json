@@ -1,0 +1,225 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://streambot/task.schema.json",
+  "title": "Task Definition",
+  "description": "Declarative task executed by streambot.task_engine.TaskEngine over SceneFacts. Each step waits for a scene condition, performs at most one action through the injected dispatcher, then verifies an explicit postcondition (the expected next scene, not merely the disappearance of the old one) under a bounded deadline. Interrupt handlers route recognized detour scenes to named steps. Simple typed variables support counters and branching.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task", "entry", "steps"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task": {"type": "string", "minLength": 1},
+    "entry": {"type": "string", "minLength": 1},
+    "variables": {
+      "type": "object",
+      "additionalProperties": {"type": ["integer", "string", "boolean"]}
+    },
+    "interrupts": {
+      "type": "object",
+      "description": "scene id -> step id executed when that scene appears while waiting.",
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "steps": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/definitions/step"}
+    }
+  },
+  "definitions": {
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["when", "action", "verify", "on_success"],
+      "properties": {
+        "when": {"$ref": "#/definitions/condition"},
+        "wait_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Deadline for `when` to match; on expiry the step fails to on_timeout."
+        },
+        "action": {"$ref": "#/definitions/action"},
+        "verify": {"$ref": "#/definitions/verify"},
+        "max_retries": {"type": "integer", "minimum": 0, "maximum": 3},
+        "retry_after_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "on_success": {"$ref": "#/definitions/target"},
+        "on_timeout": {"$ref": "#/definitions/target"},
+        "on_failure": {"$ref": "#/definitions/target"}
+      }
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A step id, or the terminal outcomes @success / @failure."
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scene": {"type": "string", "minLength": 1},
+        "scene_any": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "min_stability": {"type": "integer", "minimum": 1},
+        "has_control": {"type": "string", "minLength": 1},
+        "has_control_text": {"type": "string", "minLength": 1},
+        "var_equals": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": ["integer", "string", "boolean"]}
+        },
+        "var_less_than": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "integer"}
+        },
+        "always": {"const": true}
+      }
+    },
+    "action": {
+      "allOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "enum": [
+                "dispatch",
+                "key",
+                "drag",
+                "scroll",
+                "type-text",
+                "set-var",
+                "add-var",
+                "none"
+              ]
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "dispatch"}}},
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "control": {"type": "string", "minLength": 1},
+              "control_text": {"type": "string", "minLength": 1},
+              "recommended": {"const": true}
+            },
+            "oneOf": [
+              {"required": ["control"]},
+              {"required": ["control_text"]},
+              {"required": ["recommended"]}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "key"}}},
+          "then": {
+            "required": ["kind", "key"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "key": {"type": "string", "minLength": 1},
+              "hold_seconds": {"type": "number", "minimum": 0, "maximum": 5}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "drag"}}},
+          "then": {
+            "required": ["kind"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "from": {"$ref": "#/definitions/pointSpec"},
+              "from_norm": {"$ref": "#/definitions/pointNormSpec"},
+              "to": {"$ref": "#/definitions/pointSpec"},
+              "to_norm": {"$ref": "#/definitions/pointNormSpec"},
+              "duration_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 1.5}
+            },
+            "allOf": [
+              {"oneOf": [{"required": ["from"]}, {"required": ["from_norm"]}]},
+              {"oneOf": [{"required": ["to"]}, {"required": ["to_norm"]}]}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "scroll"}}},
+          "then": {
+            "required": ["kind", "clicks"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "clicks": {"type": "integer", "minimum": -20, "maximum": 20}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "type-text"}}},
+          "then": {
+            "required": ["kind", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "text": {"type": "string", "minLength": 1, "maxLength": 128}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"enum": ["set-var", "add-var"]}}},
+          "then": {
+            "required": ["kind", "name", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": true,
+              "name": {"type": "string", "minLength": 1},
+              "value": {"type": ["integer", "string", "boolean"]}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "none"}}},
+          "then": {
+            "required": ["kind"],
+            "additionalProperties": false,
+            "properties": {"kind": true}
+          }
+        }
+      ]
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_seconds"],
+      "properties": {
+        "scene": {"type": "string", "minLength": 1},
+        "scene_any": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "scene_not": {"type": "string", "minLength": 1},
+        "min_stability": {"type": "integer", "minimum": 1},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 120},
+        "immediate": {
+          "const": true,
+          "description": "Variable-only steps: verification passes on the next tick without a scene check."
+        }
+      }
+    },
+    "pointSpec": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "pointNormSpec": {
+      "type": "array",
+      "items": {"type": "number", "minimum": 0, "maximum": 1},
+      "minItems": 2,
+      "maxItems": 2
+    }
+  }
+}

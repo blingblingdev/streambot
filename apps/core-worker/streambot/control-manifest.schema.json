@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://streambot/control-manifest.schema.json",
+  "title": "Control Manifest",
+  "description": "Declarative per-target description of each layout: how it is recognized (detect), its clickable controls, and which control is recommended. Consumed by streambot.layout_detection.LayoutDetector (detection) and streambot.control_surface.ManifestControlScanner (controls + recommendation). Detection and point extraction are data where a declarative predicate/extractor fits, with a runtime escape hatch (string detect, context/target extractors) for the rest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "target", "layouts"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "target": {"type": "string", "minLength": 1},
+    "layouts": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/definitions/layout"}
+    }
+  },
+  "definitions": {
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controls", "recommend"],
+      "properties": {
+        "detect": {
+          "description": "How this layout is recognized. A STRING is documentation only: the target detects the layout at runtime (the escape hatch for non-declarative detectors). A predicate OBJECT makes detection declarative, evaluated by streambot.layout_detection.LayoutDetector.",
+          "oneOf": [
+            {"type": "string"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["predicates"],
+              "properties": {
+                "operator": {"enum": ["all", "any", "not"], "default": "all"},
+                "predicates": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": ["kind", "region"],
+                    "properties": {
+                      "kind": {"enum": ["pixel", "color", "template", "ocr"]},
+                      "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4},
+                      "bgr": {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3},
+                      "tolerance": {"type": "integer", "minimum": 0, "maximum": 255},
+                      "minimum_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+                      "x": {"type": "integer"},
+                      "y": {"type": "integer"},
+                      "template": {"type": "string"},
+                      "threshold": {"type": "number", "minimum": 0, "maximum": 1},
+                      "contains": {"type": "string"},
+                      "case_sensitive": {"type": "boolean"}
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "observation_mode": {"enum": ["video", "interactive", "urgent"]},
+        "controls": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/definitions/control"}
+        },
+        "recommend": {"$ref": "#/definitions/recommend"}
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action_kind", "extractor"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "action_kind": {"type": "string", "minLength": 1},
+        "extractor": {"$ref": "#/definitions/extractor"}
+      }
+    },
+    "extractor": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Extractor name. Built in: 'fixed-point' (x, y, confidence?), 'each-point' (source, start_index?, confidence? — points from context[source]), 'context-point' (source, confidence? — a single point from context[source]), 'color-blob' (region, bgr, tolerance?, min_area?, max_candidates?, order?, confidence? — connected colour blobs from the frame). A target may register additional named extractors for runtime-only detection."
+        }
+      }
+    },
+    "recommend": {
+      "type": "object",
+      "required": ["rule"],
+      "additionalProperties": true,
+      "properties": {
+        "rule": {"enum": ["static-index", "none", "by-id", "context"]},
+        "index": {"type": "integer", "minimum": 0},
+        "id": {"type": "string", "description": "by-id: recommend this control id if present"},
+        "key": {"type": "string", "description": "context: recommend the id found at context[key]"}
+      }
+    }
+  }
+}

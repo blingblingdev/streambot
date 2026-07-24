@@ -1,0 +1,24 @@
+{
+  "name": "input-example",
+  "stream": {
+    "width": 1280,
+    "height": 720
+  },
+  "actions": [
+    {"name": "move-right", "type": "mouse_move", "dx": 10, "dy": 0},
+    {"name": "point-center", "type": "mouse_position", "x": 640, "y": 360},
+    {"name": "left-click", "type": "mouse_button", "button": "left"},
+    {"name": "scroll-down", "type": "scroll", "clicks": -1},
+    {
+      "name": "ctrl-a",
+      "type": "key",
+      "key_code": 65,
+      "modifiers": ["ctrl"]
+    }
+  ],
+  "safety": {
+    "preserve_existing_desktop": true,
+    "dry_run": true,
+    "max_actions_per_minute": 30
+  }
+}

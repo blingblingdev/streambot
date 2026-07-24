@@ -1,0 +1,188 @@
+"""Tests for the target-agnostic control plane platform component."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Thread
+import time
+import unittest
+
+import numpy as np
+
+from streambot.control_plane import (
+    DEFAULT_SOCKET_PATH,
+    PersistentControlPlane,
+    send_control_command,
+)
+from streambot.observation import Observation
+
+
+class FakeInputs:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def execute(self, action: str, key: str) -> None:
+        self.calls.append(("execute", action, key))
+
+    def execute_position(self, x: int, y: int, key: str) -> None:
+        self.calls.append(("position", x, y, key))
+
+    def execute_glide(self, x: int, y: int, key: str) -> None:
+        self.calls.append(("glide", x, y, key))
+
+
+class ControlPlaneTests(unittest.TestCase):
+    def test_default_socket_path_is_generic(self) -> None:
+        path = str(DEFAULT_SOCKET_PATH)
+        self.assertTrue(path.endswith("control.sock"))
+        self.assertIn(".state", path)
+
+    def test_status_reports_latest_frame_and_page_state(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            plane.start()
+            try:
+                frame = np.zeros((8, 12, 3), dtype=np.uint8)
+                plane.publish_observation(Observation(21, time.monotonic(), frame))
+                plane.publish_page_state(
+                    21,
+                    {
+                        "primary_layout": "phone-reply-prompt",
+                        "matches": ["phone-reply-prompt"],
+                        "actionable": True,
+                    },
+                )
+                status = send_control_command(plane.socket_path, "status")
+            finally:
+                plane.close()
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["frame_number"], 21)
+        self.assertEqual(status["page_state"]["primary_layout"], "phone-reply-prompt")
+
+    def test_controls_query_omits_coordinates(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            plane.start()
+            try:
+                plane.publish_page_state(
+                    9,
+                    {
+                        "primary_layout": "pause-menu",
+                        "recommended_control_id": "go",
+                        "controls": [
+                            {"control_id": "go", "action_kind": "click", "x": 100, "y": 200, "confidence": 1.0},
+                        ],
+                    },
+                )
+                result = send_control_command(plane.socket_path, "controls")
+            finally:
+                plane.close()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["recommended_control_id"], "go")
+        self.assertEqual(len(result["controls"]), 1)
+        control = result["controls"][0]
+        self.assertEqual(control["control_id"], "go")
+        self.assertEqual(control["action_kind"], "click")
+        self.assertNotIn("x", control)
+        self.assertNotIn("y", control)
+
+    def test_dispatch_named_control_clicks_its_point(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            inputs = FakeInputs()
+            plane.start()
+            plane.publish_page_state(
+                9,
+                {
+                    "primary_layout": "pause-menu",
+                    "controls": [
+                        {"control_id": "go", "action_kind": "click", "x": 100, "y": 200, "confidence": 1.0},
+                    ],
+                },
+            )
+            response: dict[str, object] = {}
+
+            def request() -> None:
+                response.update(
+                    send_control_command(
+                        plane.socket_path, "dispatch", arguments={"control_id": "go"}
+                    )
+                )
+
+            thread = Thread(target=request)
+            thread.start()
+            deadline = time.monotonic() + 1.0
+            while thread.is_alive() and time.monotonic() < deadline:
+                plane.execute_pending(inputs)
+                time.sleep(0.005)
+            thread.join(timeout=1.0)
+            try:
+                self.assertTrue(response["ok"])
+                self.assertEqual(response["control_id"], "go")
+                self.assertEqual(inputs.calls[0][:3], ("glide", 100, 200))
+                self.assertEqual(inputs.calls[1][1], "click")
+            finally:
+                plane.close()
+
+    def test_dispatch_unknown_control_fails_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            inputs = FakeInputs()
+            plane.start()
+            plane.publish_page_state(9, {"primary_layout": "pause-menu", "controls": []})
+            response: dict[str, object] = {}
+
+            def request() -> None:
+                response.update(
+                    send_control_command(
+                        plane.socket_path, "dispatch", arguments={"control_id": "missing"}
+                    )
+                )
+
+            thread = Thread(target=request)
+            thread.start()
+            deadline = time.monotonic() + 1.0
+            while thread.is_alive() and time.monotonic() < deadline:
+                plane.execute_pending(inputs)
+                time.sleep(0.005)
+            thread.join(timeout=1.0)
+            try:
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"], "UnknownControl")
+                self.assertEqual(inputs.calls, [])
+            finally:
+                plane.close()
+
+    def test_click_command_is_serialized_to_the_input_owner(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            inputs = FakeInputs()
+            plane.start()
+            response: dict[str, object] = {}
+
+            def request() -> None:
+                response.update(
+                    send_control_command(
+                        plane.socket_path, "click", arguments={"x": 100, "y": 200}
+                    )
+                )
+
+            thread = Thread(target=request)
+            thread.start()
+            deadline = time.monotonic() + 1.0
+            while thread.is_alive() and time.monotonic() < deadline:
+                plane.execute_pending(inputs)
+                time.sleep(0.005)
+            thread.join(timeout=1.0)
+            try:
+                self.assertTrue(response["ok"])
+                self.assertEqual(inputs.calls[0][:3], ("glide", 100, 200))
+                self.assertEqual(inputs.calls[1][1], "click")
+                self.assertEqual(plane.status()["commands_completed"], 1)
+            finally:
+                plane.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
