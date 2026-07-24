@@ -173,6 +173,19 @@ The suite uses the stdlib `unittest` runner (there is no pytest):
 .venv/bin/python -m unittest tests.test_runtime     # single module
 ```
 
+## Documentation
+
+- [`CLAUDE.md`](CLAUDE.md) — architecture, commands, key invariants, and the
+  perception/click latency notes (a guide for humans and AI assistants).
+- [`AGENTS.md`](AGENTS.md) — the source of truth for operational and safety
+  policy: pairing and credentials, host connection, live-operation safety, and
+  the tool-first execution policy.
+- [`HOST_CONNECTION_TROUBLESHOOTING.md`](HOST_CONNECTION_TROUBLESHOOTING.md) —
+  macOS Local Network Privacy, mDNS, and worker launch-context diagnosis.
+- [`apps/control-panel/README.md`](apps/control-panel/README.md) — the control
+  console.
+- [`jobs/README.md`](jobs/README.md) — how to write a pluggable job.
+
 ## License
 
-See [LICENSE](LICENSE).
+Released under the [MIT License](LICENSE).

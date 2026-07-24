@@ -121,3 +121,9 @@ shortest control. Two costs dominate; benchmark them before tuning anything else
 Corollary — controls render in multiple visual STATES (colour themes, transient
 tags). Give each element a LIST of state templates and take the max score;
 capture a fixture of any new state and add a template (promote-on-encounter).
+
+## Operational policy
+
+`AGENTS.md` is the source of truth for operational and safety policy (pairing
+and credentials, host connection, live-operation safety, the tool-first
+execution policy). When it and this file disagree, follow `AGENTS.md`.
