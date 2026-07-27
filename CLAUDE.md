@@ -65,9 +65,25 @@ platform, importable from the project venv via a `.pth` entry created by
   keys/buttons, attempts emergency release on failure.
 - `runtime.py` — the long-running reconnecting loop wiring scheduler +
   coordinator + observation together. `health_payload` enforces the allowlist.
+  Environmental failures put the worker into a patient `waiting` state that
+  polls `runtime.environment_poll_seconds` without consuming reconnect budget.
+- `connection.py` — paired-identity connection with **typed failure
+  classification** (`ConnectFailure` subclasses: `NoHostVisible`,
+  `MultipleHostsVisible`, `HostUnreachable`, `HostSessionBusy`,
+  `DesktopAppMissing`, `DesktopSessionInactive`). Long-running workers connect
+  with `manage_desktop_session=True`: join an active Desktop session, launch
+  Desktop proactively when the host is idle (nothing pre-existing to
+  displace), wait with a typed `host_session_busy` code while another
+  application's session is active; quitting host sessions is forbidden
+  unconditionally. The classified `last_error_code` is part of the health
+  allowlist so the console explains the exact cause instead of guessing.
+- `worker_main.py` — `run_worker_process`, the single shared bootstrap every
+  worker entry script delegates to (connection factory, health emission,
+  signal wiring, result line). No script outside the package may construct
+  its own connection; entry scripts stay thin argument parsers.
 - `control_plane.py` — a local Unix-socket IPC surface (snapshot, click, status,
   dispatch, `report-scene`) so a job or the console can drive the worker.
-- `config.py`, `models.py`, `events.py`, `connection.py`, `ocr.py`,
+- `config.py`, `models.py`, `events.py`, `ocr.py`,
   `scene.py`, `control_surface.py` — supporting types and adapters.
 
 `apps/control-panel/` is the local operator console. `jobs/` holds pluggable,
@@ -93,6 +109,12 @@ example profiles.
 - Never end a Desktop session that existed before the worker connected.
   Coexistence/live probes require an already-active Desktop session, disconnect
   only their own client, and never call the application quit endpoint.
+- Worker session policy: a managed worker (`manage_desktop_session=True`, the
+  default via `worker_main`) joins an active Desktop session, launches Desktop
+  itself when the host reports no active application session (nothing
+  pre-existing can be displaced), and waits with a typed `host_session_busy`
+  code while another application's session is active. Quit remains forbidden
+  unconditionally, so worker disconnects always leave the session resumable.
 - Starting a stream sends one small mouse nudge to force a fresh frame — treat
   stream startup as an input-producing action.
 - Store persistent identities only under `.state/<worker-name>/`, keep

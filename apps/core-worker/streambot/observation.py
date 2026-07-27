@@ -137,8 +137,14 @@ def create_decoder(settings: ObservationSettings) -> DecoderSelection:
 
 
 @contextmanager
-def preserve_host_application_session(http):
-    """Prevent upstream setup from launching or quitting a host application."""
+def preserve_host_application_session(http, *, allow_launch: bool = False):
+    """Guard upstream stream setup against host application mutation.
+
+    Quitting is always rejected: the worker must never end a host session.
+    Launching is rejected by default and may be allowed only when the caller
+    verified at connect time that the host has NO active application session,
+    so starting Desktop cannot displace anything pre-existing.
+    """
 
     original_launch = http.launch_app
     original_quit = http.quit_app
@@ -146,7 +152,8 @@ def preserve_host_application_session(http):
     def reject_mutation(*args: object, **kwargs: object) -> None:
         raise RuntimeError("Host application mutation is disabled")
 
-    http.launch_app = reject_mutation
+    if not allow_launch:
+        http.launch_app = reject_mutation
     http.quit_app = reject_mutation
     try:
         yield
@@ -163,6 +170,9 @@ class AutomationMoonlightClient(MoonlightClient):
         self._observation_settings = observation
         self.decoder_backend: str | None = None
         self.decoder_used_fallback = False
+        # Set by connect_paired_worker only after verifying the host has no
+        # active application session, so a launch cannot displace anything.
+        self.allow_session_launch = False
 
     def _setup_stream(
         self,
@@ -176,7 +186,9 @@ class AutomationMoonlightClient(MoonlightClient):
     ):
         selection = create_decoder(self._observation_settings)
         try:
-            with preserve_host_application_session(self._get_http()):
+            with preserve_host_application_session(
+                self._get_http(), allow_launch=self.allow_session_launch
+            ):
                 session, default_decoder = super()._setup_stream(
                     app, width, height, fps, bitrate_kbps, codec, output_format
                 )
@@ -213,25 +225,39 @@ class LatestFrameObserver:
         self._frames_observed = 0
         self._last_frame_number: int | None = None
 
-    def _require_existing_desktop(self) -> None:
+    def _require_launchable_desktop(self) -> None:
+        """Allow start only into an active Desktop session or an idle host.
+
+        A sanctioned launch (``allow_session_launch``, granted at connect time
+        when the host reported no active session) accepts an idle host; the
+        launch then happens inside stream setup. A different application's
+        active session must never be displaced.
+        """
+
         http = self._client._get_http()
         apps = http.get_app_list()
         desktop = next((app for app in apps if app.name.casefold() == "desktop"), None)
         if desktop is None:
             raise RuntimeError("Desktop application is unavailable")
         info = http.parse_server_info(http.get_server_info(use_https=True))
-        if info.current_game != desktop.id:
-            raise RuntimeError("A pre-existing Desktop session is required")
+        current_game = info.current_game or 0
+        if current_game == desktop.id:
+            return
+        if current_game == 0 and getattr(
+            self._client, "allow_session_launch", False
+        ):
+            return
+        raise RuntimeError("A pre-existing Desktop session is required")
 
     def start(self) -> None:
-        """Start observation only after proving Desktop is already active."""
+        """Start observation only after proving the Desktop policy allows it."""
 
         with self._lock:
             if self._state is not WorkerState.STOPPED:
                 raise RuntimeError("observer is already started")
             self._state = WorkerState.STARTING
             try:
-                self._require_existing_desktop()
+                self._require_launchable_desktop()
                 stream = self._profile.stream
                 self._stream_context = self._client.stream(
                     app="Desktop",

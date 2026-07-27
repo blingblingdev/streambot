@@ -11,6 +11,7 @@ from typing import Callable, Mapping, Protocol
 import numpy as np
 
 from .config import AutomationProfile
+from .connection import ConnectFailure
 from .decision import WorkflowEngine
 from .input import InputTransport, MoonlightCffiTransport, SafeInputDriver
 from .models import RunOutcome, WorkerHealth, WorkerState
@@ -143,6 +144,7 @@ def health_payload(health: WorkerHealth) -> dict[str, object]:
         "actions_sent": health.actions_sent,
         "reconnects": health.reconnects,
         "last_error_type": health.last_error_type,
+        "last_error_code": health.last_error_code,
     }
 
 
@@ -203,6 +205,7 @@ class AutomationWorker:
         self._frames_observed = 0
         self._reconnects = 0
         self._last_error_type: str | None = None
+        self._last_error_code: str | None = None
         self._next_status_at = 0.0
 
     @staticmethod
@@ -229,6 +232,7 @@ class AutomationWorker:
                 actions_sent=self._inputs.protocol_events_sent,
                 reconnects=self._reconnects,
                 last_error_type=self._last_error_type,
+                last_error_code=self._last_error_code,
             )
 
     def _set_state(self, state: WorkerState, *, force_status: bool = True) -> None:
@@ -251,6 +255,9 @@ class AutomationWorker:
     def _record_error(self, error: BaseException) -> None:
         with self._lock:
             self._last_error_type = type(error).__name__
+            self._last_error_code = (
+                error.code if isinstance(error, ConnectFailure) else None
+            )
         if os.environ.get("MOONLIGHT_DEBUG_TRACE"):
             # Local debugging only: tracebacks carry no frames, addresses, or
             # identity material, and this stays off unless explicitly set.
@@ -336,6 +343,17 @@ class AutomationWorker:
                 outcome = self._run_connection()
             except Exception as error:
                 self._record_error(error)
+                if isinstance(error, ConnectFailure) and error.environmental:
+                    # The world is not ready (host asleep, no Desktop
+                    # session). This is not a worker failure: wait patiently
+                    # without consuming the reconnect budget, and connect as
+                    # soon as the environment comes back.
+                    consecutive_failures = 0
+                    self._set_state(WorkerState.WAITING)
+                    if self._wait(self._profile.runtime.environment_poll_seconds):
+                        break
+                    self._set_state(WorkerState.STARTING)
+                    continue
                 with self._lock:
                     self._reconnects += 1
                 if self.health().frames_observed > frames_before_attempt:

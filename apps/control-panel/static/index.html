@@ -89,7 +89,7 @@
   /* ---------- body: rail + stage ---------- */
   .work { flex: 1; display: flex; min-height: 0; }
   .rail { width: var(--rail); flex: none; border-right: 1px solid var(--line);
-    background: var(--panel); overflow-y: auto; display: flex; flex-direction: column; }
+    background: var(--panel); overflow: hidden; display: flex; flex-direction: column; }
   .stage { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
   .sec { border-bottom: 1px solid var(--line); }
@@ -98,19 +98,57 @@
     display: flex; align-items: center; gap: 8px; }
   .sec .body { padding: 4px 16px 16px; }
 
-  /* running job block */
-  .rjob .name { font-size: 16px; font-weight: 600; }
+  /* running job block: macro data since session start */
+  .rjob { flex: none; }
+  .rjob .namerow { display: flex; align-items: center; gap: 10px; }
+  .rjob .name { font-size: 16px; font-weight: 600; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rjob .state { display: flex; align-items: center; gap: 7px; font-family: var(--mono);
     font-size: 12px; color: var(--muted); margin: 3px 0 12px; }
   .rjob.idle .name { color: var(--muted); font-weight: 500; }
-  .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+  .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
   .kv .cell .k { font-size: 10.5px; color: var(--muted); text-transform: uppercase;
     letter-spacing: 0.06em; }
-  .kv .cell .v { font-family: var(--mono); font-size: 19px; font-variant-numeric: tabular-nums;
+  .kv .cell .v { font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums;
     margin-top: 1px; }
   .kv .cell .v small { font-size: 12px; color: var(--faint); }
   .v.ok { color: var(--ok); } .v.warn { color: var(--warn); } .v.bad { color: var(--bad); }
-  .lastact .v { font-size: 14px; }
+
+  /* stream section stays compact */
+  .stream { flex: none; }
+
+  /* scrolling perceive/click event feed */
+  .feed { flex: 1; min-height: 0; display: flex; flex-direction: column;
+    border-bottom: none; }
+  .feed .body { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 10px 12px;
+    overscroll-behavior: contain; }
+  .feed .body::-webkit-scrollbar { width: 8px; }
+  .feed .body::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  .ev { font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+    display: flex; align-items: baseline; gap: 8px; padding: 2px 8px; margin: 1px 0;
+    color: var(--muted); border-left: 2px solid transparent; border-radius: 4px; }
+  .ev .t { flex: none; color: var(--faint); font-size: 10.5px; }
+  .ev .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .ev .ms.ok { color: var(--ok); } .ev .ms.warn { color: var(--warn); }
+  .ev .ms.bad { color: var(--bad); }
+  .ev.click { background: rgba(63,185,80,.08); border-left-color: var(--ok);
+    color: var(--text); padding: 5px 8px; }
+  .ev.click .el { font-weight: 600; }
+  .ev.click .xy { color: var(--faint); font-size: 10.5px; }
+  .pill { flex: none; font-size: 10px; padding: 0 7px; border-radius: 10px;
+    border: 1px solid var(--line); color: var(--muted); }
+  .pill.ok { color: var(--ok); border-color: rgba(63,185,80,.45); background: rgba(63,185,80,.1); }
+  .pill.warn { color: var(--warn); border-color: rgba(214,160,53,.45); background: rgba(214,160,53,.1); }
+  .pill.bad { color: var(--bad); border-color: rgba(240,85,63,.45); background: rgba(240,85,63,.1); }
+  .ev.cycle { background: rgba(76,154,255,.08); border-left-color: var(--blue);
+    color: #bcd9ff; padding: 4px 8px; }
+  .ev.mile { background: rgba(45,212,191,.08); border-left-color: var(--live);
+    color: #9ff0e3; padding: 4px 8px; }
+  .ev.endrow { background: rgba(240,85,63,.08); border-left-color: var(--bad);
+    color: #ffb3a7; padding: 4px 8px; }
+  .ev.warnrow { border-left-color: var(--warn); color: var(--warn); }
+  .feed .empty { padding: 10px 8px; }
 
   /* stream mini status */
   .stream .row { display: flex; align-items: center; justify-content: space-between;
@@ -233,15 +271,20 @@
       <section class="sec rjob" id="rjobSec">
         <h2>Running</h2>
         <div class="body">
-          <div class="name" id="rjobName">None</div>
+          <div class="namerow">
+            <div class="name" id="rjobName">None</div>
+            <button class="danger sm" id="rjobStop" style="display:none">Stop job</button>
+          </div>
           <div class="state" id="rjobState"><span class="led"></span>Idle</div>
           <div class="kv" id="rjobKv">
+            <div class="cell"><div class="k">Uptime</div><div class="v mono" id="mUptime">—</div></div>
+            <div class="cell"><div class="k">Cycles</div><div class="v mono" id="mCycles">—</div></div>
+            <div class="cell"><div class="k">Total clicks</div><div class="v mono" id="mTotal">—</div></div>
+            <div class="cell"><div class="k">Clicks / min</div><div class="v mono" id="mClicks">—</div></div>
+            <div class="cell"><div class="k">Confidence</div><div class="v mono" id="mScore">—</div></div>
+            <div class="cell"><div class="k">Errors (60s)</div><div class="v mono" id="mErr">—</div></div>
             <div class="cell"><div class="k">Capture → Detect</div><div class="v mono" id="mPerceive">—</div></div>
             <div class="cell"><div class="k">Detect → Click</div><div class="v mono" id="mAct">—</div></div>
-            <div class="cell"><div class="k">Confidence</div><div class="v mono" id="mScore">—</div></div>
-            <div class="cell"><div class="k">Clicks / min</div><div class="v mono" id="mClicks">—</div></div>
-            <div class="cell"><div class="k">Errors (60s)</div><div class="v mono" id="mErr">—</div></div>
-            <div class="cell lastact"><div class="k">Last action</div><div class="v mono" id="mLast">—</div></div>
           </div>
         </div>
       </section>
@@ -254,6 +297,11 @@
           <div class="row"><span class="k">Reconnects</span><span id="sRe">—</span></div>
           <div class="row"><span class="k">Detected controls</span><span id="sCtrl">—</span></div>
         </div>
+      </section>
+
+      <section class="sec feed">
+        <h2>Perceive · Click feed</h2>
+        <div class="body" id="feed"><div class="empty">Perceive and click events scroll here once a job is running.</div></div>
       </section>
     </aside>
 
@@ -323,25 +371,40 @@ function render(payload){
     $("btnStart").disabled = worker.pid!=null || worker.socket_present;
     $("btnStop").disabled = worker.pid==null;
 
-    // fatal banner: host visible but worker rejected, or IPC broken while expected up
+    // Situation banner: driven by the worker's typed self-diagnosis, never
+    // guessed from process state (the old heuristic showed a scary permission
+    // error whenever the worker was merely stopped).
     const b = $("banner");
-    if (s.host_advertising_bonjour===true && worker.pid==null && !worker.socket_present){
-      b.innerHTML = 'The current launch environment cannot reach the local network, so the worker was blocked by the system. Start it from a terminal that has local-network permission:' +
-        '<code>.venv/bin/python run_worker.py profiles/worker.json --state-dir .state/poc</code>';
+    const situationBanners = {
+      permission_blocked: 'This launch environment cannot reach the local network, so the system blocked the worker. Start it from a terminal that holds local-network permission:' +
+        '<code>.venv/bin/python apps/core-worker/core_worker.py --state-dir .state/poc</code>',
+      waiting_desktop_session: 'No active Desktop session on the host; the worker is waiting and will connect automatically once it recovers.',
+      host_busy: 'Another application owns the host streaming session; the worker will not displace it and connects automatically when that session ends.',
+      waiting_host: 'The Sunshine host is not visible right now (asleep or offline); the worker is waiting and connects as soon as it reappears.',
+      failed: 'The worker stopped after repeated reconnect failures. Check last_error on the Logs tab, fix the cause, and start it again.',
+    };
+    if (situationBanners[s.situation]){
+      b.innerHTML = situationBanners[s.situation];
       b.classList.add("show");
     } else if (conn.ipc_error && worker.pid!=null){
       b.innerHTML = 'The worker is not responding over IPC (' + esc(conn.ipc_error) + '). Check the Logs tab for details or restart the worker.';
       b.classList.add("show");
     } else { b.classList.remove("show"); }
 
-    // running job (the single one that's running)
+    // running job (the single one that's running) — macro data + direct stop
     const running = jobs.find(j=>j.running);
     const rsec = $("rjobSec");
+    const stopBtn = $("rjobStop");
     if (running){
       rsec.classList.remove("idle");
+      runningJobName = running.name;
+      stopBtn.style.display = "";
       $("rjobName").textContent = running.title || running.name;
       $("rjobState").innerHTML = '<span class="led ok"></span>Running · pid '+running.pid;
       const m = running.metrics || {};
+      $("mUptime").textContent = fmtUptime(m.uptime_s);
+      $("mCycles").textContent = m.cycles!=null ? m.cycles : "—";
+      $("mTotal").textContent = m.clicks_total!=null ? m.clicks_total : "—";
       $("mClicks").textContent = m.clicks_per_min!=null ? m.clicks_per_min : "—";
       const sc = m.mean_score;
       const scEl = $("mScore");
@@ -359,16 +422,16 @@ function render(payload){
       const erEl = $("mErr");
       erEl.textContent = er!=null ? er : "—";
       erEl.className = "v mono " + (er?er>3?"bad":"warn":"ok");
-      if (m.last_action){
-        const age = m.last_action_age_s;
-        $("mLast").textContent = m.last_action + (m.last_score!=null?` · ${m.last_score.toFixed(2)}`:"") +
-          (age!=null?` · ${age}s ago`:"");
-      } else { $("mLast").textContent = "—"; }
+      renderFeed(running.name, running.events || []);
     } else {
       rsec.classList.add("idle");
+      runningJobName = null;
+      stopBtn.style.display = "none";
       $("rjobName").textContent = "None";
       $("rjobState").innerHTML = '<span class="led"></span>Idle — start one from the Jobs panel';
-      ["mPerceive","mAct","mScore","mClicks","mErr","mLast"].forEach(id=>{ $(id).textContent="—"; $(id).className="v mono"; });
+      ["mUptime","mCycles","mTotal","mPerceive","mAct","mScore","mClicks","mErr"]
+        .forEach(id=>{ $(id).textContent="—"; $(id).className="v mono"; });
+      resetFeed();
     }
 
     // stream mini status
@@ -400,6 +463,82 @@ function render(payload){
     // logs
     $("logbox").textContent = (s.log_tail||[]).join("\n") || "—";
   } catch(e){ /* never let one bad frame break the stream */ }
+}
+
+/* ---------- scrolling perceive/click event feed ---------- */
+let runningJobName = null;
+let feedJob = null;      // job the feed currently shows
+let feedLastI = 0;       // last appended flow-log line index (server-side)
+const FEED_MAX_ROWS = 250;
+
+function fmtUptime(s){
+  if (s==null) return "—";
+  s = Math.max(0, s|0);
+  const h = (s/3600)|0, m = ((s%3600)/60)|0, sec = s%60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${sec}s` : `${sec}s`;
+}
+function fmtClock(t){
+  return t ? new Date(t*1000).toTimeString().slice(0,8) : "";
+}
+function msGrade(ms, okMax, warnMax){ return ms<=okMax?"ok":ms<=warnMax?"warn":"bad"; }
+
+function resetFeed(){
+  feedJob = null; feedLastI = 0;
+  $("feed").innerHTML = '<div class="empty">Perceive and click events scroll here once a job is running.</div>';
+}
+
+function evRow(e){
+  const t = `<span class="t">${fmtClock(e.t)}</span>`;
+  const div = document.createElement("div");
+  const kind = e.event;
+  if (kind === "perceive"){
+    const ms = Math.round(e.perceive_ms ?? 0);
+    div.className = "ev perceive";
+    div.innerHTML = `${t}<span class="grow">perceive</span><span class="ms ${msGrade(ms,300,600)}">${ms} ms</span>`;
+  } else if (kind === "click"){
+    div.className = "ev click";
+    const sc = e.score;
+    const pill = sc!=null ? `<span class="pill ${sc>=0.9?"ok":sc>=0.8?"warn":"bad"}">${sc.toFixed(2)}</span>` : "";
+    const xy = Array.isArray(e.center) ? `<span class="xy">(${e.center[0]},${e.center[1]})</span>` : "";
+    const win = e.window ? `<span class="xy">${esc(e.window)}</span>` : "";
+    div.innerHTML = `${t}<span class="grow">click <span class="el">${esc(e.element||"?")}</span> ${xy} ${win}</span>${pill}`;
+  } else if (kind === "cycle"){
+    div.className = "ev cycle";
+    div.innerHTML = `${t}<span class="grow">✓ cycle ${e.completed ?? "?"} complete</span>`;
+  } else if (kind === "start"){
+    div.className = "ev mile";
+    div.innerHTML = `${t}<span class="grow">▶ job started</span>`;
+  } else if (kind === "done" || kind === "stopped"){
+    div.className = "ev endrow";
+    const extra = e.clicks!=null ? ` · ${e.clicks} clicks` : "";
+    div.innerHTML = `${t}<span class="grow">■ ${kind==="done"?"finished":"stopped"}: ${esc(e.reason||"")}${extra}</span>`;
+  } else if (kind === "frame-skip" || kind === "click-skip" || kind === "poll-error" || kind === "classify-skip"){
+    div.className = "ev warnrow";
+    div.innerHTML = `${t}<span class="grow">⚠ ${esc(kind)}${e.error?" · "+esc(e.error):""}</span>`;
+  } else {
+    div.className = "ev";
+    div.innerHTML = `${t}<span class="grow">${esc(kind||"event")}</span>`;
+  }
+  return div;
+}
+
+function renderFeed(jobName, events){
+  const box = $("feed");
+  const restarted = events.length && events[0].i != null &&
+    feedJob === jobName && events[events.length-1].i < feedLastI;
+  if (feedJob !== jobName || restarted){
+    box.innerHTML = "";
+    feedJob = jobName; feedLastI = 0;
+  }
+  const fresh = events.filter(e => (e.i ?? 0) > feedLastI);
+  if (!fresh.length) return;
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  for (const e of fresh){
+    box.appendChild(evRow(e));
+    feedLastI = Math.max(feedLastI, e.i ?? feedLastI);
+  }
+  while (box.children.length > FEED_MAX_ROWS) box.removeChild(box.firstChild);
+  if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 
 function renderMarkers(controls, recId){
@@ -476,6 +615,13 @@ $("btnStart").onclick=async()=>{ const r=await post("/api/worker/start");
   toast(r.ok?"Worker starting":`Start failed: ${r.error||"error"}`); };
 $("btnStop").onclick=async()=>{ const r=await post("/api/worker/stop");
   toast(r.ok?"Worker stopped":`Stop failed: ${r.error||"error"}`); };
+$("rjobStop").onclick=async()=>{
+  if (!runningJobName) return;
+  const btn=$("rjobStop"); btn.disabled=true;
+  const r=await post("/api/jobs/stop",{name:runningJobName});
+  btn.disabled=false;
+  toast(r.ok?`Stopped ${runningJobName}`:`Stop failed: ${r.error||"error"}`);
+};
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
   document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
   t.classList.add("active");

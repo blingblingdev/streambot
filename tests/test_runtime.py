@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from streambot.config import AutomationProfile, ConfigurationError
+from streambot.connection import DesktopSessionInactive, NoHostVisible
 from streambot.models import RunOutcome, WorkerHealth, WorkerState
 from streambot.observation import Observation
 from streambot.runtime import AutomationWorker, health_payload
@@ -289,6 +290,70 @@ class AutomationWorkerTests(unittest.TestCase):
         self.assertEqual(worker.health().state, WorkerState.STOPPED)
         self.assertEqual(observer.stopped, 1)
 
+    def test_environmental_wait_never_consumes_the_reconnect_budget(self) -> None:
+        profile = AutomationProfile.from_mapping(
+            {
+                "name": "waiting",
+                "runtime": {
+                    "max_reconnect_attempts": 1,
+                    "environment_poll_seconds": 7.5,
+                },
+            }
+        )
+        attempts = {"count": 0}
+
+        def factory() -> object:
+            attempts["count"] += 1
+            if attempts["count"] <= 3:
+                raise DesktopSessionInactive()
+            return object()
+
+        observer = FakeObserver([ready_observation()])
+        waits: list[float] = []
+        statuses: list[WorkerHealth] = []
+        worker = AutomationWorker(
+            profile,
+            factory,
+            observer_factory=lambda _client, _profile: observer,
+            transport_factory=lambda _client: FakeTransport(),
+            health_callback=statuses.append,
+            wait=lambda delay: waits.append(delay) or False,
+        )
+        observer.on_observe = worker.request_stop
+
+        outcome = worker.run()
+
+        # Three environmental waits, then a clean connection: the budget of
+        # one reconnect attempt was never touched and the worker never failed.
+        self.assertEqual(outcome, RunOutcome.CANCELLED)
+        self.assertEqual(waits, [7.5, 7.5, 7.5])
+        self.assertEqual(worker.health().reconnects, 0)
+        self.assertEqual(worker.health().frames_observed, 1)
+        self.assertEqual(
+            worker.health().last_error_code, "desktop_session_inactive"
+        )
+        self.assertTrue(any(item.state is WorkerState.WAITING for item in statuses))
+        self.assertFalse(any(item.state is WorkerState.FAILED for item in statuses))
+
+    def test_environmental_wait_stops_promptly_on_request(self) -> None:
+        profile = AutomationProfile.from_mapping({"name": "waiting-stop"})
+
+        def factory() -> object:
+            raise NoHostVisible()
+
+        worker = AutomationWorker(
+            profile,
+            factory,
+            observer_factory=lambda _client, _profile: FakeObserver([]),
+            transport_factory=lambda _client: FakeTransport(),
+            wait=lambda _delay: True,  # stop requested during the wait
+        )
+
+        self.assertEqual(worker.run(), RunOutcome.CANCELLED)
+        self.assertEqual(worker.health().state, WorkerState.STOPPED)
+        self.assertEqual(worker.health().last_error_code, "no_host_visible")
+        self.assertEqual(worker.health().reconnects, 0)
+
     def test_liveness_timeout_enters_recovery(self) -> None:
         class FakeClock:
             now = 0.0
@@ -323,6 +388,7 @@ class RuntimeSchemaTests(unittest.TestCase):
     def test_runtime_defaults_and_cross_field_validation(self) -> None:
         profile = AutomationProfile.from_mapping({"name": "defaults"})
         self.assertEqual(profile.runtime.max_reconnect_attempts, 5)
+        self.assertEqual(profile.runtime.environment_poll_seconds, 10.0)
         with self.assertRaises(ConfigurationError):
             AutomationProfile.from_mapping(
                 {
@@ -342,6 +408,7 @@ class RuntimeSchemaTests(unittest.TestCase):
                 actions_sent=2,
                 reconnects=1,
                 last_error_type="ConnectionError",
+                last_error_code="no_host_visible",
             )
         )
 
@@ -353,6 +420,7 @@ class RuntimeSchemaTests(unittest.TestCase):
                 "actions_sent",
                 "reconnects",
                 "last_error_type",
+                "last_error_code",
             },
         )
         self.assertNotIn("address", json.dumps(payload).casefold())

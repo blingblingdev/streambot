@@ -2,7 +2,17 @@
 
 from .branch_ledger import BranchLedger, BranchLedgerError
 from .config import AutomationProfile, load_profile
-from .connection import connect_paired_worker, desktop_session_is_active
+from .connection import (
+    ConnectFailure,
+    DesktopAppMissing,
+    DesktopSessionInactive,
+    HostSessionBusy,
+    HostUnreachable,
+    MultipleHostsVisible,
+    NoHostVisible,
+    connect_paired_worker,
+    desktop_session_is_active,
+)
 from .control_surface import (
     Control,
     ManifestControlScanner,
@@ -17,6 +27,7 @@ from .ocr import OcrError, OcrLine, RapidOcrAdapter
 from .observation import AutomationMoonlightClient, LatestFrameObserver, Observation
 from .perception import PerceptionEngine, PerceptionResult
 from .runtime import AutomationWorker, health_payload
+from .worker_main import run_worker_process
 from .model_fallback import NovelSceneFallback, SceneResolver
 from .task_engine import (
     TaskDefinitionError,
@@ -81,8 +92,16 @@ __all__ = [
     "WorkerHealth",
     "WorkerState",
     "WorkflowEngine",
+    "ConnectFailure",
+    "DesktopAppMissing",
+    "DesktopSessionInactive",
+    "HostSessionBusy",
+    "HostUnreachable",
+    "MultipleHostsVisible",
+    "NoHostVisible",
     "connect_paired_worker",
     "desktop_session_is_active",
     "load_profile",
     "health_payload",
+    "run_worker_process",
 ]

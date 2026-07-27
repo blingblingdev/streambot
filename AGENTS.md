@@ -105,6 +105,13 @@ layer.
 - Never end a Desktop session that existed before the worker connected.
   Coexistence probes must require an already-active Desktop session, disconnect
   only their own client, and must not call the application quit endpoint.
+- A managed worker joins an active Desktop session, may launch Desktop itself
+  only when the host reports no active application session (nothing
+  pre-existing can be displaced), and waits while another application's
+  session is active. Quitting host sessions is forbidden unconditionally.
+- Every connection must be constructed through `streambot.worker_main`
+  (`run_worker_process`); entry scripts under `apps/` and job runners must
+  not open their own connections.
 - Default experiments to low-cost settings such as 1280x720, 15 FPS, H.264, and
   a modest bitrate. Keep at most the latest decoded frame unless recording is
   explicitly required.

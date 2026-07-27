@@ -81,9 +81,18 @@ workflow profile exits when it reaches a success or failure terminal. Runtime
 settings define the frame-liveness timeout, the initial and maximum exponential
 backoff, the consecutive-reconnect limit, and the health interval.
 
-For a game-agnostic worker that only publishes frames and serves input over a
+For a target-agnostic worker that only publishes frames and serves input over a
 local IPC socket — the engine a hot-pluggable job or the control console drives
 — use `apps/core-worker/core_worker.py`.
+
+Connection failures are classified, not guessed: `connection.py` raises typed
+`ConnectFailure`s and the allowlisted health field `last_error_code` names the
+exact cause (`no_host_visible`, `host_unreachable`, `host_session_busy`, …).
+Environmental causes — host asleep, another application's session active — put
+the worker into a patient `waiting` state that polls the environment and
+reconnects automatically without consuming the reconnect budget; a managed
+worker joins an active Desktop session or launches Desktop itself when the
+host is idle, and never quits a host session.
 
 ## Perception
 

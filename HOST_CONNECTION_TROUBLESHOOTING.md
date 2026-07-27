@@ -13,6 +13,28 @@ other credential in this document, logs, issue reports, or command output. Use
 `<SUNSHINE_IP>` as a placeholder and keep the paired identity under
 `.state/<worker-name>/` private.
 
+## Start here: the worker self-diagnoses
+
+Before any manual triage, read the worker's own classification: health output
+(and the console banner) carries `last_error_code` from the typed connect
+failures in `streambot/connection.py`:
+
+- `no_host_visible` — discovery returned nothing. Either the host is asleep or
+  off, or this launch context lacks Local Network permission (the rest of this
+  document). The console distinguishes the two by asking the Apple-signed
+  system Bonjour browser whether the host is still advertising.
+- `host_unreachable` — the host was found but TCP failed (`EHOSTUNREACH`
+  family): host asleep, or the permission problem below.
+- `host_session_busy` — another application's session owns the host; the
+  worker waits and connects when it ends. Not an error.
+- `desktop_session_inactive` — no active Desktop session and launching was not
+  permitted for this run type (live probes keep this strict).
+- `desktop_app_missing` — the host has no application named Desktop.
+- `multiple_hosts_visible` — more than one Sunshine host answers; pin one.
+
+Environmental codes put the worker into a budget-free `waiting` state with
+automatic reconnection — a `waiting` worker needs no intervention at all.
+
 ## Verified successful connection
 
 The verified connection used the project-local Homebrew Python virtual

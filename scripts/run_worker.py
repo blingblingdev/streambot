@@ -84,7 +84,9 @@ def main() -> int:
         templates = load_templates(profile, profile_path)
         worker = AutomationWorker(
             profile,
-            lambda: connect_paired_worker(profile, args.state_dir),
+            lambda: connect_paired_worker(
+                profile, args.state_dir, manage_desktop_session=True
+            ),
             templates=templates,
             health_callback=emit_health,
         )

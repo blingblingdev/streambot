@@ -24,9 +24,29 @@ Each job is a directory with a `job.json`:
 }
 ```
 
-- `runner` is the command (relative to the repo root) the console runs to start
-  the job; extra list entries are passed as arguments. The console runs it with
-  the project venv.
+- `runner` is the command the console runs to start the job; extra list
+  entries are passed as arguments. The console runs it with the project venv.
+  Runner paths resolve against the root of the repository the jobs live in
+  (the parent of the jobs directory), so `jobs/example/runner.py` works both
+  here and in an external jobs repository.
+
+## External jobs repository
+
+Jobs do not have to live in this checkout. Point the console at any
+directory of `<name>/job.json` entries with `--jobs-dir` or the
+`STREAMBOT_JOBS_DIR` environment variable:
+
+```bash
+STREAMBOT_JOBS_DIR=/path/to/your-jobs-repo/jobs \
+  .venv/bin/python apps/control-panel/server.py
+```
+
+Job runners the console starts inherit `STREAMBOT_HOME` (this checkout — the
+venv, the `streambot` package, and the worker's `.state` socket live here)
+and `STREAMBOT_JOBS_DIR`, and run with the jobs repository root as their
+working directory. Any number of runners share the single worker stream over
+the IPC socket, so a separately managed private jobs repository plus this
+platform is a complete replacement for keeping jobs in-tree.
 
 A job owns its own assets (templates as pickle-disabled `.npy` BGR arrays,
 OCR language packs, etc.) under its own directory. Keep mutable runtime output

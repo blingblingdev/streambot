@@ -23,23 +23,18 @@ while automation is off.
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import signal
 import sys
-import time
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_DIR / "apps" / "core-worker"))
 
 from streambot.config import AutomationProfile
-from streambot.connection import connect_paired_worker
 from streambot.control_plane import PersistentControlPlane
 from streambot.input import SafeInputDriver
-from streambot.models import RunOutcome, WorkerHealth
 from streambot.observation import Observation
-from streambot.runtime import AutomationWorker, health_payload
+from streambot.worker_main import run_worker_process
 
 # Target-agnostic socket: distinct from any single job's socket so the console
 # supervises the shared engine, and from the platform default so tests are not
@@ -152,44 +147,16 @@ def main() -> int:
     # frame over IPC; frames are still never written by the worker itself.
     control = PersistentControlPlane(args.control_socket, allow_frame_export=True)
     try:
-        profile = AutomationProfile.from_mapping(CORE_PROFILE)
-
-        def emit_health(health: WorkerHealth) -> None:
-            payload = {"type": "health", **health_payload(health)}
-            control.publish_health(payload)
-            print(json.dumps(payload, sort_keys=True), flush=True)
-
-        worker = AutomationWorker(
-            profile,
-            lambda: connect_paired_worker(profile, args.state_dir, host=args.host),
-            health_callback=emit_health,
+        return run_worker_process(
+            AutomationProfile.from_mapping(CORE_PROFILE),
+            args.state_dir,
+            host=args.host,
+            control=control,
             persistent_perception_factory=lambda inputs: FramePublishRuntime(
                 control, inputs
             ),
+            max_runtime_seconds=args.max_runtime_seconds,
         )
-
-        def request_stop(_signum=None, _frame=None) -> None:
-            worker.request_stop()
-
-        signal.signal(signal.SIGINT, request_stop)
-        signal.signal(signal.SIGTERM, request_stop)
-        if args.max_runtime_seconds:
-            signal.setitimer(signal.ITIMER_REAL, args.max_runtime_seconds)
-            signal.signal(signal.SIGALRM, request_stop)
-        control.start()
-        outcome = worker.run()
-        print(
-            json.dumps(
-                {
-                    "type": "result",
-                    "outcome": outcome.value,
-                    "sensitive_details_exposed": False,
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-        return 0 if outcome in {RunOutcome.SUCCESS, RunOutcome.CANCELLED} else 1
     finally:
         control.close()
         os.umask(previous_umask)

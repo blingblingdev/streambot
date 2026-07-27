@@ -731,6 +731,10 @@ class RuntimeSettings:
     max_reconnect_attempts: int = 5
     liveness_timeout_seconds: float = 10.0
     status_interval_seconds: float = 5.0
+    # Poll cadence while the environment is not ready (host asleep, no
+    # Desktop session). Environmental waits are patient and unbounded, so
+    # they poll slowly instead of following the reconnect backoff.
+    environment_poll_seconds: float = 10.0
 
     @classmethod
     def from_mapping(cls, value: object) -> "RuntimeSettings":
@@ -741,6 +745,7 @@ class RuntimeSettings:
             "max_reconnect_attempts",
             "liveness_timeout_seconds",
             "status_interval_seconds",
+            "environment_poll_seconds",
         }
         _strict_keys(data, required=set(), optional=allowed, path="runtime")
         result = cls(
@@ -773,6 +778,12 @@ class RuntimeSettings:
                 "runtime.status_interval_seconds",
                 0.1,
                 300.0,
+            ),
+            environment_poll_seconds=_number(
+                data.get("environment_poll_seconds", 10.0),
+                "runtime.environment_poll_seconds",
+                0.5,
+                600.0,
             ),
         )
         if result.reconnect_max_seconds < result.reconnect_initial_seconds:

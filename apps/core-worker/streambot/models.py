@@ -13,6 +13,7 @@ class WorkerState(StrEnum):
     OBSERVING = "observing"
     ACTING = "acting"
     RECOVERING = "recovering"
+    WAITING = "waiting"
     STOPPED = "stopped"
     FAILED = "failed"
 
@@ -34,3 +35,6 @@ class WorkerHealth:
     actions_sent: int = 0
     reconnects: int = 0
     last_error_type: str | None = None
+    # Short allowlisted ConnectFailure code (e.g. "desktop_session_inactive")
+    # so operators see why a connection cannot proceed; never free-form text.
+    last_error_code: str | None = None

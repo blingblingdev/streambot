@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,15 @@ from streambot.control_plane import send_control_command  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LOG_DIR = PROJECT_ROOT / ".state" / "control-panel"
+
+# Jobs can live outside this checkout (a separately managed jobs repository).
+# STREAMBOT_JOBS_DIR (or --jobs-dir) points at the directory holding
+# <name>/job.json entries; runner paths in job.json resolve against that
+# directory's PARENT — the root of whichever repository the jobs live in —
+# so a jobs repo keeps repo-root-relative runner paths exactly like this one.
+JOBS_ROOT = Path(
+    os.environ.get("STREAMBOT_JOBS_DIR", str(PROJECT_ROOT / "jobs"))
+).expanduser().resolve()
 # The console supervises the target-agnostic core engine, never a specific
 # job's worker. The running job publishes its own scene via the `report-scene`
 # IPC seam, so the overlay reflects whatever job is active — not a baked-in one.
@@ -113,18 +123,220 @@ class WorkerSupervisor:
         return text[-lines:]
 
 
+class FlowLogReader:
+    """Incremental flow-log.jsonl reader: session totals plus a recent-event ring.
+
+    Reads only bytes appended since the previous poll, so per-tick cost stays
+    proportional to new activity. Session aggregates (uptime, total clicks,
+    cycles, mean score) reset on each `start` event; the ring feeds the
+    console's scrolling event stream with a monotonically increasing index
+    the client uses for append-only dedupe.
+    """
+
+    RING_SIZE = 120
+    ERROR_EVENTS = {"poll-error", "frame-skip", "click-skip", "classify-skip"}
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._offset = 0
+        self._remainder = ""
+        self._line_no = 0
+        self._ring: deque[dict[str, Any]] = deque(maxlen=self.RING_SIZE)
+        self._session: dict[str, Any] | None = None
+
+    def _reset(self) -> None:
+        self._offset = 0
+        self._remainder = ""
+        self._line_no = 0
+        self._ring.clear()
+        self._session = None
+
+    def poll(self) -> None:
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            self._reset()
+            return
+        if size < self._offset:
+            self._reset()
+        if size == self._offset:
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(self._offset)
+                chunk = handle.read(size - self._offset)
+        except OSError:
+            return
+        self._offset = size
+        text = self._remainder + chunk
+        lines = text.split("\n")
+        self._remainder = lines.pop()  # trailing partial line, if any
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            self._line_no += 1
+            event["i"] = self._line_no
+            self._ring.append(event)
+            self._apply(event)
+
+    def _apply(self, event: dict[str, Any]) -> None:
+        kind = event.get("event")
+        if kind == "start":
+            self._session = {
+                "started_t": event.get("t"),
+                "clicks": 0,
+                "cycles": 0,
+                "score_sum": 0.0,
+                "score_n": 0,
+            }
+            return
+        session = self._session
+        if session is None:
+            # Tail started mid-session: accumulate without a start marker.
+            session = self._session = {
+                "started_t": event.get("t"),
+                "clicks": 0,
+                "cycles": 0,
+                "score_sum": 0.0,
+                "score_n": 0,
+            }
+        if kind == "click":
+            session["clicks"] += 1
+            score = event.get("score")
+            if isinstance(score, (int, float)):
+                session["score_sum"] += float(score)
+                session["score_n"] += 1
+        elif kind == "cycle":
+            completed = event.get("completed")
+            session["cycles"] = (
+                int(completed)
+                if isinstance(completed, int)
+                else session["cycles"] + 1
+            )
+
+    def metrics(self, window: float = 60.0) -> dict[str, Any] | None:
+        """Macro session aggregates plus a recent window, or None if no data."""
+
+        if not self._ring and self._session is None:
+            return None
+        now = int(time.time())
+        ring = list(self._ring)
+        recent = [e for e in ring if now - e.get("t", 0) <= window]
+        clicks = [e for e in recent if e.get("event") == "click"]
+        errors = [e for e in recent if e.get("event") in self.ERROR_EVENTS]
+        perceive = [
+            e["perceive_ms"]
+            for e in recent
+            if isinstance(e.get("perceive_ms"), (int, float))
+        ]
+        act = [e["act_ms"] for e in clicks if isinstance(e.get("act_ms"), (int, float))]
+        all_clicks = [e for e in ring if e.get("event") == "click"]
+        last = all_clicks[-1] if all_clicks else None
+        session = self._session or {}
+        started = session.get("started_t")
+        score_n = session.get("score_n", 0)
+        return {
+            # Macro (since the session's `start` event).
+            "uptime_s": (now - started) if isinstance(started, int) else None,
+            "clicks_total": session.get("clicks", 0),
+            "cycles": session.get("cycles", 0),
+            "mean_score": (
+                round(session.get("score_sum", 0.0) / score_n, 3) if score_n else None
+            ),
+            # Recent window (operational health).
+            "clicks_per_min": round(len(clicks) * 60.0 / window, 1),
+            "last_score": (
+                round(float(last["score"]), 3)
+                if last and isinstance(last.get("score"), (int, float))
+                else None
+            ),
+            "last_action": (last.get("element") if last else None),
+            "last_action_age_s": (now - last["t"]) if last and "t" in last else None,
+            "perceive_ms": round(sum(perceive) / len(perceive)) if perceive else None,
+            "act_ms": round(sum(act) / len(act)) if act else None,
+            "errors_recent": len(errors),
+        }
+
+    def recent_events(self, limit: int = 60) -> list[dict[str, Any]]:
+        return list(self._ring)[-limit:]
+
+
 class JobSupervisor:
     """Own at most one runner child per jobs/<name> (job.json declares it)."""
 
     def __init__(self) -> None:
         self._processes: dict[str, subprocess.Popen] = {}
         self._log_paths: dict[str, Path] = {}
+        self._flow_readers: dict[str, FlowLogReader] = {}
+        self._scan_cache: tuple[float, dict[str, int]] = (0.0, {})
         self._lock = threading.Lock()
+
+    def _external_pids(self) -> dict[str, int]:
+        """Adopt runner processes this console did not spawn (cached ~2s).
+
+        A console restart must not orphan a running job: the UI still shows
+        it as running and the stop button still works (targeted SIGTERM).
+        """
+
+        now = time.monotonic()
+        cached_at, cached = self._scan_cache
+        if now - cached_at < 2.0:
+            return cached
+        found: dict[str, int] = {}
+        own = {p.pid for p in self._processes.values() if p.poll() is None}
+        for name, spec in self.registry().items():
+            script = spec["runner"][0]
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            pids = [int(p) for p in result.stdout.split() if p.isdigit()]
+            for pid in pids:
+                if pid in own:
+                    continue
+                if self._is_runner_process(pid, script):
+                    found[name] = pid
+                    break
+        self._scan_cache = (now, found)
+        return found
+
+    @staticmethod
+    def _is_runner_process(pid: int, script: str) -> bool:
+        """Verify a scanned pid really is our venv running this job script.
+
+        `pgrep -f` matches any command line containing the path (an editor,
+        a `tail -f`), and stop() sends SIGTERM to adopted pids — so confirm
+        the full command line before ever treating a pid as a runner.
+        """
+
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        command = result.stdout.strip()
+        return ".venv/bin/python" in command and script in command
 
     @staticmethod
     def registry() -> dict[str, dict]:
         jobs: dict[str, dict] = {}
-        for manifest in sorted((PROJECT_ROOT / "jobs").glob("*/job.json")):
+        for manifest in sorted(JOBS_ROOT.glob("*/job.json")):
             try:
                 spec = json.loads(manifest.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -149,14 +361,24 @@ class JobSupervisor:
             process = self._processes.get(name)
             if process is not None and process.poll() is None:
                 return {"ok": False, "error": "AlreadyRunning"}
+            if name in self._external_pids():
+                return {"ok": False, "error": "AlreadyRunning"}
             LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             log_path = LOG_DIR / f"job-{name}.log"
             log = open(log_path, "a", encoding="utf-8")
-            script = PROJECT_ROOT / spec["runner"][0]
+            # Runner paths resolve against the jobs repository root, and the
+            # child inherits the platform/jobs wiring explicitly so external
+            # runners find the venv, the package, and the worker socket.
+            jobs_repo_root = JOBS_ROOT.parent
+            script = jobs_repo_root / spec["runner"][0]
             command = [str(VENV_PYTHON), str(script), *spec["runner"][1:]]
+            child_env = dict(os.environ)
+            child_env.setdefault("STREAMBOT_HOME", str(PROJECT_ROOT))
+            child_env.setdefault("STREAMBOT_JOBS_DIR", str(JOBS_ROOT))
             self._processes[name] = subprocess.Popen(
                 command,
-                cwd=str(PROJECT_ROOT),
+                cwd=str(jobs_repo_root),
+                env=child_env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
@@ -170,7 +392,23 @@ class JobSupervisor:
             process = self._processes.get(name)
             if process is None or process.poll() is not None:
                 self._processes.pop(name, None)
-                return {"ok": False, "error": "NotRunning"}
+                external = self._external_pids().get(name)
+                if external is None:
+                    return {"ok": False, "error": "NotRunning"}
+                # Adopted job from a previous console: targeted SIGTERM, then
+                # bounded wait; escalate to SIGKILL only if it ignores it.
+                try:
+                    os.kill(external, signal.SIGTERM)
+                    for _ in range(50):
+                        time.sleep(0.2)
+                        os.kill(external, 0)
+                    os.kill(external, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    return {"ok": False, "error": "StopFailed"}
+                self._scan_cache = (0.0, {})
+                return {"ok": True}
             process.send_signal(signal.SIGTERM)
             try:
                 process.wait(timeout=10.0)
@@ -180,70 +418,22 @@ class JobSupervisor:
             self._processes.pop(name, None)
             return {"ok": True}
 
-    def stop_all(self) -> None:
-        for name in list(self._processes):
-            self.stop(name)
-
-    @staticmethod
-    def _flow_metrics(name: str, window: float = 60.0) -> dict[str, Any] | None:
-        """Real operating metrics for a running job, from its flow-log.jsonl.
-
-        Returns clicks-per-minute (efficiency), the recent mean match score
-        (recognition confidence), the two latencies that actually matter for a
-        sub-second click loop — capture-to-detect (perceive_ms) and
-        detect-to-click (act_ms) — the last action, and the recent error count.
-        """
-
-        path = PROJECT_ROOT / "jobs" / name / "flow-log.jsonl"
-        if not path.is_file():
-            return None
-        try:
-            tail = path.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]
-        except OSError:
-            return None
-        events = []
-        for line in tail:
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        if not events:
-            return None
-        # Age against the WALL CLOCK, not the newest event's own timestamp —
-        # otherwise "last action" is always 0s ago and never advances.
-        now = int(time.time())
-        recent = [e for e in events if now - e.get("t", 0) <= window]
-        clicks = [e for e in recent if e.get("event") == "click"]
-        errors = [
-            e for e in recent
-            if e.get("event") in ("poll-error", "frame-skip", "click-skip", "classify-skip")
-        ]
-        scores = [e["score"] for e in clicks if isinstance(e.get("score"), (int, float))]
-        # capture-to-detect samples come from every poll (click + throttled
-        # perceive events); detect-to-click samples come only from real clicks.
-        perceive = [
-            e["perceive_ms"] for e in recent
-            if isinstance(e.get("perceive_ms"), (int, float))
-        ]
-        act = [e["act_ms"] for e in clicks if isinstance(e.get("act_ms"), (int, float))]
-        last = clicks[-1] if clicks else None
-        return {
-            "clicks_per_min": round(len(clicks) * 60.0 / window, 1),
-            "mean_score": round(sum(scores) / len(scores), 3) if scores else None,
-            "last_score": round(float(last["score"]), 3) if last and isinstance(last.get("score"), (int, float)) else None,
-            "last_action": (last.get("element") if last else None),
-            "last_action_age_s": (now - last["t"]) if last and "t" in last else None,
-            "perceive_ms": round(sum(perceive) / len(perceive)) if perceive else None,
-            "act_ms": round(sum(act) / len(act)) if act else None,
-            "errors_recent": len(errors),
-        }
+    def _flow_reader(self, name: str) -> FlowLogReader:
+        reader = self._flow_readers.get(name)
+        if reader is None:
+            reader = FlowLogReader(JOBS_ROOT / name / "flow-log.jsonl")
+            self._flow_readers[name] = reader
+        return reader
 
     def status(self) -> list[dict[str, Any]]:
         rows = []
         with self._lock:
+            external = self._external_pids()
             for name, spec in self.registry().items():
                 process = self._processes.get(name)
-                running = process is not None and process.poll() is None
+                owned = process is not None and process.poll() is None
+                pid = process.pid if owned else external.get(name)
+                running = pid is not None
                 log_path = self._log_paths.get(name)
                 last_log = ""
                 if log_path is not None and log_path.exists():
@@ -251,15 +441,23 @@ class JobSupervisor:
                         encoding="utf-8", errors="replace"
                     ).splitlines()
                     last_log = lines[-1][-160:] if lines else ""
+                metrics = None
+                events: list[dict[str, Any]] = []
+                if running:
+                    reader = self._flow_reader(name)
+                    reader.poll()
+                    metrics = reader.metrics()
+                    events = reader.recent_events()
                 rows.append(
                     {
                         "name": name,
                         "title": spec["title"],
                         "description": spec["description"],
                         "running": running,
-                        "pid": process.pid if running else None,
+                        "pid": pid,
                         "last_log": last_log,
-                        "metrics": self._flow_metrics(name) if running else None,
+                        "metrics": metrics,
+                        "events": events,
                     }
                 )
         return rows
@@ -287,6 +485,50 @@ def host_visible_via_bonjour(timeout: float = 3.0) -> bool | None:
     except (OSError, ValueError):
         return None
     return any(" Add " in line for line in output.splitlines())
+
+
+def classify_situation(
+    *,
+    ipc_present: bool,
+    state: str | None,
+    last_error_code: str | None,
+    bonjour: bool | None,
+    owned: bool,
+    socket_present: bool,
+) -> str:
+    """Explain the worker's condition from its typed self-report.
+
+    The worker publishes an allowlisted ``last_error_code`` for classified
+    connection failures, so this no longer guesses from reconnect counts and
+    exception type names. ``bonjour`` (the Apple-signed system browser) only
+    breaks the tie for host-visibility waits: if the system daemon sees the
+    host advertising while the worker cannot, the launch context's Local
+    Network grant is the prime suspect.
+    """
+
+    if ipc_present:
+        if state in {"observing", "acting"}:
+            return "connected"
+        if state == "waiting":
+            if last_error_code == "desktop_session_inactive":
+                return "waiting_desktop_session"
+            if last_error_code == "host_session_busy":
+                return "host_busy"
+            if last_error_code in {"no_host_visible", "host_unreachable"}:
+                return "permission_blocked" if bonjour else "waiting_host"
+            return "waiting_host"
+        if state in {"recovering", "starting"}:
+            return "connecting"
+        if state == "failed":
+            return "failed"
+        if state == "stopped":
+            return "stopped"
+        return "unknown"
+    if owned and not socket_present:
+        return "starting"
+    if not owned and not socket_present:
+        return "stopped"
+    return "unknown"
 
 
 class ConsoleState:
@@ -322,23 +564,18 @@ class ConsoleState:
         state = health.get("state")
         reconnects = health.get("reconnects")
         last_error = health.get("last_error_type")
+        last_error_code = health.get("last_error_code")
 
         # Classify the situation so the UI can explain it plainly.
         bonjour = self.bonjour()
-        if ipc and state == "observing":
-            situation = "connected"
-        elif ipc and state in {"recovering", "starting"}:
-            situation = (
-                "permission_blocked"
-                if bonjour and (reconnects or 0) >= 2 and last_error == "RuntimeError"
-                else "connecting"
-            )
-        elif owned and not socket_present:
-            situation = "starting"
-        elif not owned and not socket_present:
-            situation = "stopped"
-        else:
-            situation = "unknown"
+        situation = classify_situation(
+            ipc_present=ipc is not None,
+            state=state,
+            last_error_code=last_error_code,
+            bonjour=bonjour,
+            owned=owned is not None,
+            socket_present=socket_present,
+        )
 
         controls = page.get("controls", []) or []
         return {
@@ -357,6 +594,7 @@ class ConsoleState:
                 "frame_age_ms": (ipc or {}).get("frame_age_ms"),
                 "reconnects": reconnects,
                 "last_error_type": last_error,
+                "last_error_code": last_error_code,
                 "ipc_error": ipc_error,
             },
             "scene": {
@@ -547,7 +785,18 @@ def main() -> int:
         default=None,
         help="worker IPC socket; defaults to <state-dir>/core-control.sock",
     )
+    parser.add_argument(
+        "--jobs-dir",
+        type=Path,
+        default=None,
+        help="directory holding <name>/job.json entries "
+        "(default: $STREAMBOT_JOBS_DIR, else <repo>/jobs)",
+    )
     args = parser.parse_args()
+
+    if args.jobs_dir is not None:
+        global JOBS_ROOT
+        JOBS_ROOT = args.jobs_dir.expanduser().resolve()
 
     socket_path = args.control_socket or (
         args.state_dir / "core-control.sock"
@@ -559,9 +808,11 @@ def main() -> int:
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
 
     def _shutdown(*_args) -> None:
-        console.jobs.stop_all()
-        supervisor.stop()
-        server.shutdown()
+        # The console is only the operator surface: closing it must never
+        # take down the worker or a running job. A restarted console
+        # re-adopts both (worker via its IPC socket, jobs via process scan),
+        # and stopping them stays an explicit UI/API action.
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
@@ -570,10 +821,7 @@ def main() -> int:
     print(f"streambot control console on {url}")
     print("Launched from a Local-Network-permitted terminal, the worker you")
     print("start here inherits that grant. Open the URL in your browser.")
-    try:
-        server.serve_forever()
-    finally:
-        supervisor.stop()
+    server.serve_forever()
     return 0
 
 

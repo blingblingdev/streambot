@@ -99,6 +99,17 @@ class HostSessionGuardTests(unittest.TestCase):
         self.assertEqual(http.launch_calls, 1)
         self.assertEqual(http.quit_calls, 1)
 
+    def test_allow_launch_permits_launch_but_never_quit(self) -> None:
+        http = FakeMutableHttp()
+
+        with preserve_host_application_session(http, allow_launch=True):
+            http.launch_app()
+            with self.assertRaisesRegex(RuntimeError, "disabled"):
+                http.quit_app()
+
+        self.assertEqual(http.launch_calls, 1)
+        self.assertEqual(http.quit_calls, 0)
+
 
 @dataclass
 class FakeApp:
@@ -239,6 +250,31 @@ class LatestFrameObserverTests(unittest.TestCase):
 
         self.assertEqual(client.events, [])
         self.assertEqual(client.quit_calls, 0)
+        self.assertEqual(observer.health().state, WorkerState.STOPPED)
+
+    def test_start_accepts_idle_host_with_sanctioned_launch(self) -> None:
+        client = FakeClient(current_game=0)
+        client.allow_session_launch = True
+        observer = LatestFrameObserver(client, self.profile)
+
+        with observer:
+            self.assertIsNotNone(observer.observe())
+
+        self.assertEqual(client.quit_calls, 0)
+        self.assertEqual(
+            client.events,
+            ["stream:enter", "buffer:enter", "buffer:exit", "stream:exit"],
+        )
+
+    def test_sanctioned_launch_never_displaces_another_session(self) -> None:
+        client = FakeClient(current_game=99)
+        client.allow_session_launch = True
+        observer = LatestFrameObserver(client, self.profile)
+
+        with self.assertRaisesRegex(RuntimeError, "pre-existing"):
+            observer.start()
+
+        self.assertEqual(client.events, [])
         self.assertEqual(observer.health().state, WorkerState.STOPPED)
 
     def test_stream_cleanup_runs_when_buffer_cleanup_fails(self) -> None:

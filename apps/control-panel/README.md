@@ -23,6 +23,17 @@ child process of it, so macOS attributes the worker's local-network access to
 the console's responsible code and it inherits the grant. See
 `../../HOST_CONNECTION_TROUBLESHOOTING.md`.
 
+Connection trouble is never guessed from reconnect counts. The worker
+classifies failures itself (`streambot/connection.py`) and manages the host
+Desktop session: it joins an active Desktop session, launches Desktop
+proactively when the host is idle (nothing pre-existing to displace), and
+waits patiently — state `waiting`, situation `host_busy` or `waiting_host` —
+while another application's session is active or the host is asleep. It
+reconnects automatically the moment the environment recovers; quitting host
+sessions stays forbidden; only real errors consume the reconnect budget and
+can end in `failed`. The console turns the worker's `last_error_code` into an
+actionable banner instead of a guess.
+
 ## Run it
 
 From the repository root, in your own terminal:
@@ -32,7 +43,9 @@ From the repository root, in your own terminal:
 ```
 
 Then open `http://127.0.0.1:8787/`. Options: `--port`, `--state-dir`
-(default `.state/poc`), `--control-socket`.
+(default `.state/poc`), `--control-socket`, `--jobs-dir` (or
+`STREAMBOT_JOBS_DIR`) to load jobs from an external repository — see
+`../../jobs/README.md`.
 
 ## What it does
 
@@ -44,9 +57,16 @@ Then open `http://127.0.0.1:8787/`. Options: `--port`, `--state-dir`
   a readable list; the recommended control is marked, and clicking a row
   dispatches it by id. A running job publishes what it detects over the
   `report-scene` IPC command, so the overlay reflects whichever job is active.
-- **Jobs** — every `jobs/*/job.json` with its running state, per-job metrics
-  (capture→detect and detect→click latency, clicks/min, confidence, recent
-  errors, last action), and a Start/Stop button.
+- **Jobs** — every `<jobs-dir>/*/job.json` with its running state and a
+  Start/Stop button. The running job's card carries a direct stop button and
+  macro session data (uptime, cycles, total clicks, clicks/min, mean
+  confidence, capture→detect and detect→click latency, recent errors) fed by
+  an incremental `flow-log.jsonl` reader, plus a color-graded scrolling
+  perceive/click event feed (DOM capped, auto-follow unless you scroll up).
+- **Restart-safe** — closing the console never stops the worker or a running
+  job: a restarted console re-adopts the worker through its IPC socket and
+  jobs through a process scan that verifies the full command line before it
+  will ever signal a pid. Stopping anything is always an explicit action.
 - **Live frame** — the frame in the browser only, never written to disk (the
   JPEG temp file is deleted immediately). Cadence is selectable — 1 second, 1
   minute, or paused — and paused still refreshes once a minute so the view never
