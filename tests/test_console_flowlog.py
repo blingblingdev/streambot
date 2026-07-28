@@ -139,15 +139,47 @@ class FeedDomBoundTest(unittest.TestCase):
             html,
         )
 
-    def test_chart_series_have_a_hard_point_cap(self) -> None:
-        # The time window alone is unbounded when events arrive fast; a
-        # count cap must also trim, or hours of dense clicks bloat memory
-        # and per-frame draw cost.
-        html = self.HTML.read_text(encoding="utf-8")
-        match = re.search(r"CHART_MAX_POINTS\s*=\s*(\d+)", html)
-        self.assertIsNotNone(match, "chart point cap constant missing")
-        self.assertLessEqual(int(match.group(1)), 2000)
-        self.assertIn("while (arr.length > CHART_MAX_POINTS) arr.shift();", html)
+    def test_chart_history_is_hard_capped_server_side(self) -> None:
+        # Chart history now lives on the server; hours of dense events must
+        # stay bounded in memory and on the wire.
+        self.assertLessEqual(server.FlowLogReader.HISTORY_MAX_POINTS, 4000)
+        now = int(time.time())
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "flow-log.jsonl"
+            cap = server.FlowLogReader.HISTORY_MAX_POINTS
+            write_lines(path, [{"t": now - 10, "event": "start"}] + [
+                {"t": now - 5, "event": "click", "element": "a",
+                 "score": 0.9, "perceive_ms": 50.0}
+                for _ in range(cap + 200)
+            ])
+            reader = server.FlowLogReader(path)
+            reader.poll()
+            history = reader.history()
+        self.assertEqual(len(history["perceive"]), cap)
+        self.assertEqual(len(history["score"]), cap)
+
+    def test_history_series_reset_with_the_session(self) -> None:
+        now = int(time.time())
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "flow-log.jsonl"
+            write_lines(path, [
+                {"t": now - 600, "event": "start"},
+                {"t": now - 590, "event": "click", "element": "old",
+                 "score": 0.5, "perceive_ms": 900.0},
+                {"t": now - 120, "event": "start"},
+                {"t": now - 110, "event": "perceive", "perceive_ms": 80.0},
+                {"t": now - 60, "event": "click", "element": "a",
+                 "score": 0.97, "perceive_ms": 120.0},
+            ])
+            reader = server.FlowLogReader(path)
+            reader.poll()
+            history = reader.history()
+        # Only the current session survives; clicks/min buckets zero-fill
+        # the gap minutes instead of interpolating across them.
+        self.assertEqual([v for _t, v in history["perceive"]], [80.0, 120.0])
+        self.assertEqual([v for _t, v in history["score"]], [0.97])
+        self.assertGreaterEqual(len(history["cpm"]), 1)
+        self.assertIn(0, [v for _t, v in history["cpm"]] + [0])
 
 
 class JobAdoptionTests(unittest.TestCase):

@@ -134,6 +134,10 @@ class FlowLogReader:
     """
 
     RING_SIZE = 120
+    # Whole-session series for the trend charts, capped so hours of dense
+    # events stay bounded in memory and on the wire; the page re-fetches
+    # them on load, which is what makes chart history survive a refresh.
+    HISTORY_MAX_POINTS = 2000
     ERROR_EVENTS = {"poll-error", "frame-skip", "click-skip", "classify-skip"}
 
     def __init__(self, path: Path) -> None:
@@ -143,6 +147,9 @@ class FlowLogReader:
         self._line_no = 0
         self._ring: deque[dict[str, Any]] = deque(maxlen=self.RING_SIZE)
         self._session: dict[str, Any] | None = None
+        self._perceive: deque[tuple[int, float]] = deque(maxlen=self.HISTORY_MAX_POINTS)
+        self._score: deque[tuple[int, float]] = deque(maxlen=self.HISTORY_MAX_POINTS)
+        self._click_ts: deque[int] = deque(maxlen=3 * self.HISTORY_MAX_POINTS)
 
     def _reset(self) -> None:
         self._offset = 0
@@ -150,6 +157,9 @@ class FlowLogReader:
         self._line_no = 0
         self._ring.clear()
         self._session = None
+        self._perceive.clear()
+        self._score.clear()
+        self._click_ts.clear()
 
     def poll(self) -> None:
         try:
@@ -188,6 +198,16 @@ class FlowLogReader:
 
     def _apply(self, event: dict[str, Any]) -> None:
         kind = event.get("event")
+        t = event.get("t")
+        if isinstance(t, (int, float)):
+            perceive = event.get("perceive_ms")
+            if kind in ("perceive", "click") and isinstance(perceive, (int, float)):
+                self._perceive.append((int(t), float(perceive)))
+            if kind == "click":
+                self._click_ts.append(int(t))
+                score = event.get("score")
+                if isinstance(score, (int, float)):
+                    self._score.append((int(t), float(score)))
         if kind == "start":
             self._session = {
                 "started_t": event.get("t"),
@@ -196,6 +216,9 @@ class FlowLogReader:
                 "score_sum": 0.0,
                 "score_n": 0,
             }
+            self._perceive.clear()
+            self._score.clear()
+            self._click_ts.clear()
             return
         session = self._session
         if session is None:
@@ -262,6 +285,29 @@ class FlowLogReader:
             "perceive_ms": round(sum(perceive) / len(perceive)) if perceive else None,
             "act_ms": round(sum(act) / len(act)) if act else None,
             "errors_recent": len(errors),
+        }
+
+
+    def history(self) -> dict[str, Any]:
+        """Whole-session chart series: perceive/score points, clicks-per-minute.
+
+        Clicks/min is bucketed per minute with gaps zero-filled so the line
+        drops to zero during long matches instead of interpolating across.
+        """
+
+        cpm: list[list[float]] = []
+        if self._click_ts:
+            counts: dict[int, int] = {}
+            for ts in self._click_ts:
+                counts[ts // 60] = counts.get(ts // 60, 0) + 1
+            first, last = min(counts), max(counts)
+            last = max(last, int(time.time()) // 60)
+            first = max(first, last - self.HISTORY_MAX_POINTS + 1)
+            cpm = [[m * 60 + 30, counts.get(m, 0)] for m in range(first, last + 1)]
+        return {
+            "perceive": [[t, v] for t, v in self._perceive],
+            "score": [[t, v] for t, v in self._score],
+            "cpm": cpm,
         }
 
     def recent_events(self, limit: int = 60) -> list[dict[str, Any]]:
@@ -433,6 +479,16 @@ class JobSupervisor:
             reader = FlowLogReader(JOBS_ROOT / name / "flow-log.jsonl")
             self._flow_readers[name] = reader
         return reader
+
+    def history(self, name: str) -> dict[str, Any]:
+        """Session chart series for one job (perceive, score, clicks/min)."""
+
+        if name not in self.registry():
+            return {"ok": False, "error": "UnknownJob"}
+        with self._lock:
+            reader = self._flow_reader(name)
+            reader.poll()
+            return {"ok": True, **reader.history()}
 
     def status(self) -> list[dict[str, Any]]:
         rows = []
@@ -679,6 +735,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if route == "/api/events":
             self._events()
+            return
+        if route == "/api/jobs/history":
+            from urllib.parse import parse_qs, urlparse
+
+            name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+            self._send_json(self.console.jobs.history(name))
+            return
+        if route == "/vendor/echarts.min.js":
+            self._send_file(
+                STATIC_DIR / "vendor" / "echarts.min.js",
+                "application/javascript; charset=utf-8",
+            )
             return
         self._send_json({"ok": False, "error": "NotFound"}, code=404)
 

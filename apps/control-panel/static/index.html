@@ -194,8 +194,11 @@
   .gcard .ghead .cur.bad { color: var(--bad); }
   .gcard .gbody { position: relative; flex: 1; min-height: 0;
     background: #05070a; }
-  canvas.chart { position: absolute; inset: 0; width: 100%; height: 100%; }
-  .stageFrame { position: absolute; inset: 0; overflow: hidden; }
+  .chart { position: absolute; inset: 0; }
+  .gcard .gbody.live { display: flex; align-items: center;
+    justify-content: center; }
+  .stageFrame { position: relative; overflow: hidden;
+    background: #05070a; }
   .stageFrame img { position: absolute; inset: 0; width: 100%; height: 100%;
     object-fit: fill; display: none; }
   .stageFrame .hint { position: absolute; inset: 0; display: flex; align-items: center;
@@ -332,7 +335,7 @@
       <div class="cardGrid">
         <div class="gcard">
           <div class="ghead">Live frame</div>
-          <div class="gbody">
+          <div class="gbody live">
             <div class="stageFrame" id="stageFrame">
               <img id="frame" alt="Live worker frame">
               <div class="hint" id="hint">The live frame appears once the worker connects.<br>Detected controls overlay the frame; click a marker to dispatch it.</div>
@@ -341,15 +344,15 @@
         </div>
         <div class="gcard">
           <div class="ghead">Capture → Detect <span class="cur" id="curPerceive">—</span></div>
-          <div class="gbody"><canvas class="chart" id="chPerceive"></canvas></div>
+          <div class="gbody"><div class="chart" id="chPerceive"></div></div>
         </div>
         <div class="gcard">
           <div class="ghead">Click confidence <span class="cur" id="curScore">—</span></div>
-          <div class="gbody"><canvas class="chart" id="chScore"></canvas></div>
+          <div class="gbody"><div class="chart" id="chScore"></div></div>
         </div>
         <div class="gcard">
           <div class="ghead">Clicks / min <span class="cur" id="curCpm">—</span></div>
-          <div class="gbody"><canvas class="chart" id="chCpm"></canvas></div>
+          <div class="gbody"><div class="chart" id="chCpm"></div></div>
         </div>
       </div>
     </div>
@@ -368,6 +371,7 @@
 
   <div id="toast"></div>
 
+<script src="vendor/echarts.min.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -573,31 +577,116 @@ function renderFeed(jobName, events){
   if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 
-/* ---------- realtime trend charts (equal cards beside the live frame) ----
-   Series are fed two ways, both realtime: the server's recent-event ring
-   seeds a few minutes of history on load / reconnect, and every SSE tick
-   (~1s) appends the fresh events plus the windowed clicks/min sample. */
-const SERIES_WINDOW_S = 900;               // keep at most 15 min per series
-const CHART_MAX_POINTS = 600;              // hard cap per series: the time
-                                           // window alone is unbounded when
-                                           // events arrive fast, so oldest
-                                           // points also drop past this count
-const series = { perceive: [], score: [], cpm: [] };
+/* ---------- realtime trend charts (ECharts, vendored locally) ----------
+   History lives on the SERVER (whole-session series from flow-log.jsonl via
+   /api/jobs/history), so a page refresh loses nothing; the client refetches
+   on load and every few seconds, and the SSE tick keeps the headline values
+   current between fetches. */
+const HISTORY_FETCH_MS = 3000;
+let charts = null;         // {perceive, score, cpm} ECharts instances
 let chartJob = null;
-let chartLastI = 0;
+let historyTimer = null;
 
-function seriesPush(arr, t, v){
-  if (t == null || v == null) return;
-  arr.push([t, v]);
-  const cut = t - SERIES_WINDOW_S;
-  while (arr.length && arr[0][0] < cut) arr.shift();
-  while (arr.length > CHART_MAX_POINTS) arr.shift();
+function chartOption(color, valueFmt){
+  return {
+    animation: false,
+    grid: { left: 52, right: 14, top: 14, bottom: 26 },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "#141922", borderColor: "#28303d",
+      textStyle: { color: "#e8ecf3", fontSize: 12 },
+      valueFormatter: valueFmt,
+    },
+    xAxis: {
+      type: "time",
+      axisLine: { lineStyle: { color: "#28303d" } },
+      axisLabel: { color: "#5a6474", fontSize: 10.5, hideOverlap: true },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value", scale: true,
+      axisLabel: { color: "#5a6474", fontSize: 10.5 },
+      splitLine: { lineStyle: { color: "rgba(255,255,255,.06)" } },
+    },
+    series: [{
+      type: "line", showSymbol: false, sampling: "lttb",
+      lineStyle: { color: color, width: 1.6 },
+      itemStyle: { color: color },
+      areaStyle: { color: color, opacity: 0.08 },
+      data: [],
+    }],
+  };
+}
+
+function initCharts(){
+  if (charts || typeof echarts === "undefined") return;
+  charts = {
+    perceive: echarts.init($("chPerceive")),
+    score: echarts.init($("chScore")),
+    cpm: echarts.init($("chCpm")),
+  };
+  charts.perceive.setOption(chartOption("#2dd4bf", v => Math.round(v) + " ms"));
+  charts.score.setOption(chartOption("#e3b341", v => Number(v).toFixed(2)));
+  charts.cpm.setOption(chartOption("#4c9aff", v => v + " /min"));
+}
+
+function setSeries(chart, points){
+  chart.setOption({ series: [{ data: points.map(([t, v]) => [t * 1000, v]) }] });
+}
+
+async function refreshHistory(jobName){
+  const now = Date.now();
+  if (jobName === chartJob && now - (refreshHistory.at || 0) < HISTORY_FETCH_MS) return;
+  refreshHistory.at = now;
+  chartJob = jobName;
+  try {
+    const r = await fetch(`/api/jobs/history?name=${encodeURIComponent(jobName)}`);
+    const h = await r.json();
+    if (!h.ok || chartJob !== jobName) return;
+    initCharts();
+    if (!charts) return;
+    setSeries(charts.perceive, h.perceive || []);
+    setSeries(charts.score, h.score || []);
+    setSeries(charts.cpm, h.cpm || []);
+  } catch (e) { /* transient fetch failure: next tick retries */ }
+}
+
+function headlineCharts(m){
+  const set = (id, v, cls) => { const el = $(id);
+    el.textContent = v; el.className = "cur " + (cls || ""); };
+  const p = m.perceive_ms;
+  set("curPerceive", p != null ? Math.round(p) + " ms" : "—",
+      p == null ? "" : p <= 300 ? "ok" : p <= 600 ? "warn" : "bad");
+  const s = m.last_score != null ? m.last_score : m.mean_score;
+  set("curScore", s != null ? s.toFixed(2) : "—",
+      s == null ? "" : s >= 0.9 ? "ok" : s >= 0.8 ? "warn" : "bad");
+  const c = m.clicks_per_min;
+  set("curCpm", c != null ? String(c) : "—", "ok");
+}
+
+function resetCharts(){
+  chartJob = null;
+  if (charts){
+    for (const chart of Object.values(charts)){
+      chart.setOption({ series: [{ data: [] }] });
+    }
+  }
+  for (const id of ["curPerceive", "curScore", "curCpm"]){
+    $(id).textContent = "—"; $(id).className = "cur";
+  }
+}
+
+function ingestCharts(jobName, _events, metrics){
+  initCharts();
+  headlineCharts(metrics || {});
+  refreshHistory(jobName);
 }
 
 /* Column count follows the card count and the container's shape: pick the
    grid whose cells come closest to 16:9, so however many cards exist they
    tile the whole stage with no dead space below (4 cards -> 2x2 on a
-   typical wide screen). */
+   typical wide screen). The live frame is then letterboxed to a true 16:9
+   box inside its card — never stretched — and the charts are resized. */
 function layoutCards(){
   const grid = document.querySelector(".cardGrid");
   if (!grid) return;
@@ -611,108 +700,20 @@ function layoutCards(){
     if (err < bestErr){ bestErr = err; best = cols; }
   }
   grid.style.gridTemplateColumns = `repeat(${best}, 1fr)`;
+  requestAnimationFrame(() => {
+    const body = document.querySelector(".gbody.live");
+    const stage = $("stageFrame");
+    if (body && stage){
+      const bw = body.clientWidth, bh = body.clientHeight;
+      const w = Math.min(bw, bh * 16 / 9);
+      stage.style.width = Math.floor(w) + "px";
+      stage.style.height = Math.floor(w * 9 / 16) + "px";
+    }
+    if (charts) for (const chart of Object.values(charts)) chart.resize();
+  });
 }
 window.addEventListener("resize", layoutCards);
 layoutCards();
-
-function resetCharts(){
-  chartJob = null; chartLastI = 0;
-  series.perceive.length = 0; series.score.length = 0; series.cpm.length = 0;
-  for (const [cv, cur] of [["chPerceive","curPerceive"],["chScore","curScore"],["chCpm","curCpm"]]){
-    drawChart(cv, cur, [], {});
-    $(cur).textContent = "—"; $(cur).className = "cur";
-  }
-}
-
-function ingestCharts(jobName, events, metrics){
-  const restarted = events.length && events[0].i != null &&
-    chartJob === jobName && events[events.length-1].i < chartLastI;
-  if (chartJob !== jobName || restarted){
-    chartJob = jobName; chartLastI = 0;
-    series.perceive.length = 0; series.score.length = 0; series.cpm.length = 0;
-  }
-  for (const e of events){
-    if ((e.i ?? 0) <= chartLastI) continue;
-    chartLastI = e.i ?? chartLastI;
-    if (e.event === "perceive"){
-      seriesPush(series.perceive, e.t, e.perceive_ms);
-    } else if (e.event === "click"){
-      seriesPush(series.perceive, e.t, e.perceive_ms);
-      seriesPush(series.score, e.t, e.score);
-    }
-  }
-  if (metrics && metrics.clicks_per_min != null){
-    seriesPush(series.cpm, Date.now()/1000, metrics.clicks_per_min);
-  }
-  drawChart("chPerceive", "curPerceive", series.perceive,
-    { fmt: v=>Math.round(v)+" ms", grade: v=>v<=300?"ok":v<=600?"warn":"bad",
-      color: "#2dd4bf", lo: 0 });
-  drawChart("chScore", "curScore", series.score,
-    { fmt: v=>v.toFixed(2), grade: v=>v>=0.9?"ok":v>=0.8?"warn":"bad",
-      color: "#e3b341", lo: 0.5, hi: 1.02, dots: true });
-  drawChart("chCpm", "curCpm", series.cpm,
-    { fmt: v=>v.toFixed(1), grade: ()=>"ok", color: "#4c9aff", lo: 0 });
-}
-
-function drawChart(canvasId, curId, data, opts){
-  const canvas = $(canvasId);
-  if (!canvas) return;
-  const dpr = window.devicePixelRatio || 1;
-  const W = canvas.clientWidth, H = canvas.clientHeight;
-  if (!W || !H) return;
-  if (canvas.width !== W*dpr || canvas.height !== H*dpr){
-    canvas.width = W*dpr; canvas.height = H*dpr;
-  }
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, W, H);
-
-  // Frame: horizontal gridlines only, quiet like the rest of the theme.
-  ctx.strokeStyle = "rgba(255,255,255,.06)";
-  ctx.lineWidth = 1;
-  for (const f of [0.25, 0.5, 0.75]){
-    ctx.beginPath(); ctx.moveTo(0, H*f); ctx.lineTo(W, H*f); ctx.stroke();
-  }
-  const cur = $(curId);
-  if (!data.length){
-    if (cur){ cur.textContent = "—"; cur.className = "cur"; }
-    return;
-  }
-
-  let lo = opts.lo != null ? opts.lo : Math.min(...data.map(d=>d[1]));
-  let hi = opts.hi != null ? opts.hi : Math.max(...data.map(d=>d[1]));
-  if (opts.lo == null) lo = Math.min(lo, hi - 1e-6);
-  if (opts.hi == null){ const pad = (hi - lo) * 0.15 + 1e-6; hi += pad; }
-  const t1 = data[data.length-1][0];
-  const t0 = Math.min(data[0][0], t1 - 60);       // never cram: >= 60s span
-  const PX = 10, PY = 8;
-  const x = t => PX + (W - 2*PX) * (t - t0) / Math.max(1, t1 - t0);
-  const y = v => H - PY - (H - 2*PY) * (v - lo) / Math.max(1e-6, hi - lo);
-
-  ctx.beginPath();
-  data.forEach(([t, v], i) => { i ? ctx.lineTo(x(t), y(v)) : ctx.moveTo(x(t), y(v)); });
-  ctx.strokeStyle = opts.color || "#2dd4bf";
-  ctx.lineWidth = 1.6;
-  ctx.stroke();
-  // Soft fill under the line grounds the card visually.
-  const last = data[data.length-1];
-  ctx.lineTo(x(last[0]), H - PY); ctx.lineTo(x(data[0][0]), H - PY); ctx.closePath();
-  ctx.globalAlpha = 0.10; ctx.fillStyle = opts.color || "#2dd4bf";
-  ctx.fill(); ctx.globalAlpha = 1;
-  if (opts.dots){
-    ctx.fillStyle = opts.color || "#2dd4bf";
-    for (const [t, v] of data.slice(-80)){
-      ctx.beginPath(); ctx.arc(x(t), y(v), 1.6, 0, Math.PI*2); ctx.fill();
-    }
-  }
-  // Latest sample marker + headline value in the card header.
-  ctx.beginPath(); ctx.arc(x(last[0]), y(last[1]), 3, 0, Math.PI*2);
-  ctx.fillStyle = opts.color || "#2dd4bf"; ctx.fill();
-  if (cur){
-    cur.textContent = (opts.fmt || String)(last[1]);
-    cur.className = "cur " + ((opts.grade || (()=>""))(last[1]) || "");
-  }
-}
 
 function renderMarkers(controls, recId){
   const frame = $("stageFrame");
