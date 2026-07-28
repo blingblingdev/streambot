@@ -98,17 +98,84 @@ class WorkerSupervisor:
     def stop(self) -> dict[str, Any]:
         with self._lock:
             process = self._process
-            if process is None or process.poll() is not None:
+            if process is not None and process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                try:
+                    process.wait(timeout=8.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=4.0)
                 self._process = None
-                return {"ok": False, "error": "NotRunning"}
-            process.send_signal(signal.SIGTERM)
-            try:
-                process.wait(timeout=8.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=4.0)
+                return {"ok": True}
             self._process = None
+            # Adopted worker from a previous console generation: same
+            # semantics as adopted jobs — targeted SIGTERM, bounded wait,
+            # SIGKILL only if it ignores the term.
+            external = self.external_pid()
+            if external is None:
+                return {"ok": False, "error": "NotRunning"}
+            try:
+                os.kill(external, signal.SIGTERM)
+                for _ in range(50):
+                    time.sleep(0.2)
+                    os.kill(external, 0)
+                os.kill(external, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # exited: exactly what stop wants
+            except OSError:
+                return {"ok": False, "error": "SignalFailed"}
             return {"ok": True}
+
+    def external_pid(self) -> int | None:
+        """Pid of a live worker this console did not start, else None.
+
+        Adoption mirrors the job scan: pgrep candidates are verified by
+        their full command line (a python interpreter running
+        core_worker.py), so an editor or pager holding the file is never
+        signaled. Cached briefly — status polls every second."""
+
+        now = time.monotonic()
+        cached_at, cached = getattr(self, "_ext_cache", (0.0, None))
+        if now - cached_at < 2.0:
+            return cached
+        found: int | None = None
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "core_worker.py"],
+                capture_output=True, text=True, timeout=2.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None:
+            own = self.owned_pid()
+            for token in result.stdout.split():
+                try:
+                    pid = int(token)
+                except ValueError:
+                    continue
+                if pid in (own, os.getpid()):
+                    continue
+                if self._is_worker_process(pid):
+                    found = pid
+                    break
+        self._ext_cache = (now, found)
+        return found
+
+    @staticmethod
+    def _is_worker_process(pid: int) -> bool:
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, timeout=2.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        command = result.stdout.strip()
+        if "core_worker.py" not in command:
+            return False
+        parts = command.split()
+        interpreter = parts[0] if parts else ""
+        return "python" in Path(interpreter).name.lower()
 
     def owned_pid(self) -> int | None:
         process = self._process
@@ -616,6 +683,7 @@ class ConsoleState:
         supervisor = self.supervisor
         owned = supervisor.owned_pid()
         socket_present = supervisor.socket_path.exists()
+        adopted = None if owned is not None else supervisor.external_pid()
         ipc: dict[str, Any] | None = None
         ipc_error: str | None = None
         if socket_present:
@@ -648,7 +716,9 @@ class ConsoleState:
             "situation": situation,
             "worker": {
                 "owned_by_console": owned is not None,
-                "pid": owned,
+                # Adopted pid included: the stop button works on any worker
+                # this console can verify, not only its own children.
+                "pid": owned if owned is not None else adopted,
                 "socket_present": socket_present,
             },
             "host_advertising_bonjour": bonjour,

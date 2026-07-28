@@ -244,5 +244,59 @@ class JobAdoptionTests(unittest.TestCase):
                 )
 
 
+
+
+class WorkerAdoptionTests(unittest.TestCase):
+    """The stop button must work on any worker the console can verify."""
+
+    def make_supervisor(self):
+        return server.WorkerSupervisor(Path("/tmp/x"), Path("/tmp/x.sock"))
+
+    def test_adopted_stop_sends_one_targeted_sigterm(self) -> None:
+        supervisor = self.make_supervisor()
+        kills: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kills.append((pid, sig))
+            if sig == 0:
+                raise ProcessLookupError  # exited right after SIGTERM
+
+        with mock.patch.object(
+            supervisor, "external_pid", return_value=555
+        ), mock.patch.object(server.os, "kill", side_effect=fake_kill), \
+                mock.patch.object(server.time, "sleep", lambda _s: None):
+            self.assertEqual(supervisor.stop(), {"ok": True})
+
+        self.assertEqual(kills[0], (555, signal.SIGTERM))
+        self.assertNotIn((555, signal.SIGKILL), kills)
+
+    def test_stop_without_any_worker_reports_not_running(self) -> None:
+        supervisor = self.make_supervisor()
+        with mock.patch.object(supervisor, "external_pid", return_value=None):
+            self.assertEqual(
+                supervisor.stop(), {"ok": False, "error": "NotRunning"}
+            )
+
+    def test_worker_verification_accepts_python_rejects_editors(self) -> None:
+        cases = [
+            ("vim apps/core-worker/core_worker.py\n", False),
+            ("/repo/.venv/bin/python apps/core-worker/core_worker.py\n", True),
+            ("/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/"
+             "Python.framework/Versions/3.14/Resources/Python.app/"
+             "Contents/MacOS/Python /r/apps/core-worker/core_worker.py\n", True),
+            ("/usr/bin/python3 some_other_script.py\n", False),
+        ]
+        for stdout, expected in cases:
+            with mock.patch.object(
+                server.subprocess, "run",
+                return_value=SimpleNamespace(stdout=stdout),
+            ):
+                self.assertEqual(
+                    server.WorkerSupervisor._is_worker_process(1),
+                    expected, stdout,
+                )
+
+
+
 if __name__ == "__main__":
     unittest.main()
