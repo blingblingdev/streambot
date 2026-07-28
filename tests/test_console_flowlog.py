@@ -139,6 +139,16 @@ class FeedDomBoundTest(unittest.TestCase):
             html,
         )
 
+    def test_chart_series_have_a_hard_point_cap(self) -> None:
+        # The time window alone is unbounded when events arrive fast; a
+        # count cap must also trim, or hours of dense clicks bloat memory
+        # and per-frame draw cost.
+        html = self.HTML.read_text(encoding="utf-8")
+        match = re.search(r"CHART_MAX_POINTS\s*=\s*(\d+)", html)
+        self.assertIsNotNone(match, "chart point cap constant missing")
+        self.assertLessEqual(int(match.group(1)), 2000)
+        self.assertIn("while (arr.length > CHART_MAX_POINTS) arr.shift();", html)
+
 
 class JobAdoptionTests(unittest.TestCase):
     """A restarted console re-adopts running jobs and can stop them safely."""

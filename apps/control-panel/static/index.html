@@ -174,9 +174,12 @@
   /* Equal-sized card grid: the live frame is one card among the realtime
      trend charts, every card body a 16:9 box, so the grid stays uniform
      at any width. */
-  .cardGrid { flex: 1; min-height: 0; overflow-y: auto; padding: 16px;
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-    gap: 14px; align-content: start; background:
+  /* Fill the whole stage: rows share the leftover height equally, so
+     however many cards there are, they tile edge-to-edge with no dead
+     space below. */
+  .cardGrid { flex: 1; min-height: 0; overflow: hidden; padding: 16px;
+    display: grid; grid-template-columns: repeat(2, 1fr);
+    grid-auto-rows: 1fr; gap: 14px; background:
     radial-gradient(1200px 600px at 50% -10%, #10151d, var(--bg)); }
   .gcard { border: 1px solid var(--line); border-radius: 10px;
     background: var(--panel); overflow: hidden; display: flex;
@@ -189,7 +192,7 @@
   .gcard .ghead .cur.ok { color: var(--ok); }
   .gcard .ghead .cur.warn { color: var(--warn); }
   .gcard .ghead .cur.bad { color: var(--bad); }
-  .gcard .gbody { position: relative; aspect-ratio: 16 / 9;
+  .gcard .gbody { position: relative; flex: 1; min-height: 0;
     background: #05070a; }
   canvas.chart { position: absolute; inset: 0; width: 100%; height: 100%; }
   .stageFrame { position: absolute; inset: 0; overflow: hidden; }
@@ -575,6 +578,10 @@ function renderFeed(jobName, events){
    seeds a few minutes of history on load / reconnect, and every SSE tick
    (~1s) appends the fresh events plus the windowed clicks/min sample. */
 const SERIES_WINDOW_S = 900;               // keep at most 15 min per series
+const CHART_MAX_POINTS = 600;              // hard cap per series: the time
+                                           // window alone is unbounded when
+                                           // events arrive fast, so oldest
+                                           // points also drop past this count
 const series = { perceive: [], score: [], cpm: [] };
 let chartJob = null;
 let chartLastI = 0;
@@ -584,7 +591,29 @@ function seriesPush(arr, t, v){
   arr.push([t, v]);
   const cut = t - SERIES_WINDOW_S;
   while (arr.length && arr[0][0] < cut) arr.shift();
+  while (arr.length > CHART_MAX_POINTS) arr.shift();
 }
+
+/* Column count follows the card count and the container's shape: pick the
+   grid whose cells come closest to 16:9, so however many cards exist they
+   tile the whole stage with no dead space below (4 cards -> 2x2 on a
+   typical wide screen). */
+function layoutCards(){
+  const grid = document.querySelector(".cardGrid");
+  if (!grid) return;
+  const count = grid.children.length;
+  const W = grid.clientWidth, H = grid.clientHeight;
+  if (!count || !W || !H) return;
+  let best = 1, bestErr = Infinity;
+  for (let cols = 1; cols <= count; cols++){
+    const rows = Math.ceil(count / cols);
+    const err = Math.abs((W / cols) / (H / rows) - 16 / 9);
+    if (err < bestErr){ bestErr = err; best = cols; }
+  }
+  grid.style.gridTemplateColumns = `repeat(${best}, 1fr)`;
+}
+window.addEventListener("resize", layoutCards);
+layoutCards();
 
 function resetCharts(){
   chartJob = null; chartLastI = 0;
