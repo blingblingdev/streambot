@@ -184,14 +184,22 @@ class JobAdoptionTests(unittest.TestCase):
         runner = SimpleNamespace(
             stdout="/repo/.venv/bin/python jobs/x/flow_runner.py\n"
         )
+        # macOS ps reports the RESOLVED interpreter binary, not the
+        # .venv/bin/python argv the spawner passed — adoption must still work.
+        framework = SimpleNamespace(
+            stdout="/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/"
+            "Python.framework/Versions/3.14/Resources/Python.app/"
+            "Contents/MacOS/Python jobs/x/flow_runner.py\n"
+        )
         with mock.patch.object(server.subprocess, "run", return_value=editor):
             self.assertFalse(
                 server.JobSupervisor._is_runner_process(1, "jobs/x/flow_runner.py")
             )
-        with mock.patch.object(server.subprocess, "run", return_value=runner):
-            self.assertTrue(
-                server.JobSupervisor._is_runner_process(1, "jobs/x/flow_runner.py")
-            )
+        for real in (runner, framework):
+            with mock.patch.object(server.subprocess, "run", return_value=real):
+                self.assertTrue(
+                    server.JobSupervisor._is_runner_process(1, "jobs/x/flow_runner.py")
+                )
 
 
 if __name__ == "__main__":

@@ -331,7 +331,16 @@ class JobSupervisor:
         except (OSError, subprocess.TimeoutExpired):
             return False
         command = result.stdout.strip()
-        return ".venv/bin/python" in command and script in command
+        if script not in command:
+            return False
+        # The interpreter check must survive macOS resolving the venv
+        # symlink chain: ps reports the real binary
+        # (…/Python.app/Contents/MacOS/Python), never the .venv/bin/python
+        # argv the spawner passed. Accept any interpreter whose basename
+        # contains "python" — an editor or pager holding the script path
+        # (vim/tail/less) still fails this and is never signaled.
+        interpreter = command.split()[0] if command.split() else ""
+        return "python" in Path(interpreter).name.lower()
 
     @staticmethod
     def registry() -> dict[str, dict]:
