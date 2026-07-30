@@ -125,6 +125,12 @@ example profiles.
 ## Conventions
 
 - All code comments, documentation, and commit messages in English.
+- **Commit and push every finished set of changes.** Work that only exists in
+  the working tree is work nobody else can see, review, or recover — and a
+  live session that gets interrupted loses it. Finish a coherent change, run
+  the tests, commit, then `git push`. This applies to both repositories
+  (`streambot` and `streambot-jobs`); a change that spans them needs a push
+  on each.
 - Pin the `moonlight-python` release deliberately; record upgrades.
 
 ## Perception/click latency
