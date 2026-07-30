@@ -68,6 +68,12 @@ def run_worker_process(
         persistent_perception_factory=persistent_perception_factory,
     )
 
+    connection_controls = getattr(control, "set_connection_controls", None)
+    if callable(connection_controls):
+        # Operator stream detach/attach over IPC (console buttons). Optional:
+        # a control plane without the setter simply has no such commands.
+        connection_controls(worker.request_detach, worker.request_attach)
+
     def request_stop(_signum=None, _frame=None) -> None:
         worker.request_stop()
 

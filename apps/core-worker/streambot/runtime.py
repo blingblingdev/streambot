@@ -199,6 +199,8 @@ class AutomationWorker:
         )
         self._clock = clock
         self._stop = Event()
+        self._detach_requested = Event()
+        self._attach_requested = Event()
         self._wait = wait or self._stop.wait
         self._lock = RLock()
         self._state = WorkerState.STOPPED
@@ -221,6 +223,22 @@ class AutomationWorker:
         """Request graceful cancellation from a signal handler or controller."""
 
         self._stop.set()
+
+    def request_detach(self) -> None:
+        """Drop the stream connection but keep the worker (and IPC) alive.
+
+        An operator decision, not a failure: the current connection is torn
+        down through the normal cleanup path (held input released, observer
+        stopped) and the worker parks in ``detached`` until reattached or
+        stopped. No reconnect budget is consumed.
+        """
+
+        self._detach_requested.set()
+
+    def request_attach(self) -> None:
+        """Leave the detached state and reconnect the stream."""
+
+        self._attach_requested.set()
 
     def health(self) -> WorkerHealth:
         """Return an allowlisted snapshot with no target or frame content."""
@@ -296,7 +314,7 @@ class AutomationWorker:
                 self._persistent_perception.reset()
             self._set_state(WorkerState.OBSERVING)
             last_frame_at = self._clock()
-            while not self._stop.is_set():
+            while not self._stop.is_set() and not self._detach_requested.is_set():
                 observation = observer.observe(timeout=1.0)
                 now = self._clock()
                 if observation is None:
@@ -338,6 +356,18 @@ class AutomationWorker:
         self._set_state(WorkerState.STARTING)
         consecutive_failures = 0
         while not self._stop.is_set():
+            if self._detach_requested.is_set():
+                # Operator detach: park with no connection until reattach or
+                # stop. Like environmental waiting, this consumes no budget.
+                consecutive_failures = 0
+                self._attach_requested.clear()
+                self._set_state(WorkerState.DETACHED)
+                while not self._stop.is_set() and not self._attach_requested.wait(0.5):
+                    self._emit_status()
+                self._detach_requested.clear()
+                if self._stop.is_set():
+                    break
+                self._set_state(WorkerState.STARTING)
             frames_before_attempt = self.health().frames_observed
             try:
                 outcome = self._run_connection()
@@ -379,6 +409,10 @@ class AutomationWorker:
                     self._set_state(WorkerState.STOPPED)
                 return outcome
             if not self._stop.is_set():
+                if self._detach_requested.is_set():
+                    # The connection ended because a detach was requested;
+                    # the loop top parks the worker. Not an error.
+                    continue
                 self._record_error(RuntimeError("connection ended without outcome"))
                 continue
 

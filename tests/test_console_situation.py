@@ -87,6 +87,9 @@ class ClassifySituationTests(unittest.TestCase):
             "waiting_host",
         )
 
+    def test_operator_detach_is_its_own_situation(self) -> None:
+        self.assertEqual(classify(state="detached"), "detached")
+
     def test_transient_states_are_connecting(self) -> None:
         self.assertEqual(classify(state="starting"), "connecting")
         self.assertEqual(classify(state="recovering"), "connecting")

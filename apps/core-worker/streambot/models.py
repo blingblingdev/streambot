@@ -14,6 +14,7 @@ class WorkerState(StrEnum):
     ACTING = "acting"
     RECOVERING = "recovering"
     WAITING = "waiting"
+    DETACHED = "detached"
     STOPPED = "stopped"
     FAILED = "failed"
 

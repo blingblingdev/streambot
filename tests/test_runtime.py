@@ -354,6 +354,53 @@ class AutomationWorkerTests(unittest.TestCase):
         self.assertEqual(worker.health().last_error_code, "no_host_visible")
         self.assertEqual(worker.health().reconnects, 0)
 
+    def test_detach_parks_without_budget_and_attach_reconnects(self) -> None:
+        profile = AutomationProfile.from_mapping(
+            {"name": "detach", "runtime": {"max_reconnect_attempts": 0}}
+        )
+        observers = [
+            FakeObserver([ready_observation()]),
+            FakeObserver([ready_observation()]),
+        ]
+        attempts = {"count": 0}
+
+        def factory() -> object:
+            attempts["count"] += 1
+            return object()
+
+        statuses: list[WorkerHealth] = []
+
+        def reattach_once_detached(health: WorkerHealth) -> None:
+            statuses.append(health)
+            if health.state is WorkerState.DETACHED:
+                worker.request_attach()
+
+        worker = AutomationWorker(
+            profile,
+            factory,
+            observer_factory=lambda _client, _profile: observers[attempts["count"] - 1],
+            transport_factory=lambda _client: FakeTransport(),
+            health_callback=reattach_once_detached,
+        )
+        # First connection detaches after its frame; the DETACHED status
+        # emission triggers reattach; the second connection stops the worker.
+        observers[0].on_observe = worker.request_detach
+        observers[1].on_observe = worker.request_stop
+
+        outcome = worker.run()
+
+        self.assertEqual(outcome, RunOutcome.CANCELLED)
+        self.assertEqual(attempts["count"], 2)
+        # Detach is an operator decision, not a failure: with a zero reconnect
+        # budget the worker still never failed, recorded no error, and the
+        # first connection was cleaned up exactly once.
+        self.assertEqual(worker.health().reconnects, 0)
+        self.assertIsNone(worker.health().last_error_type)
+        self.assertEqual(observers[0].stopped, 1)
+        self.assertEqual(worker.health().frames_observed, 2)
+        self.assertTrue(any(item.state is WorkerState.DETACHED for item in statuses))
+        self.assertFalse(any(item.state is WorkerState.FAILED for item in statuses))
+
     def test_liveness_timeout_enters_recovery(self) -> None:
         class FakeClock:
             now = 0.0

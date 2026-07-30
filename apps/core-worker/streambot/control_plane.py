@@ -89,6 +89,19 @@ class PersistentControlPlane:
         self._last_event: dict[str, Any] | None = None
         self._recent_events: deque[dict[str, Any]] = deque(maxlen=32)
         self._commands_completed = 0
+        self._on_detach: Any = None
+        self._on_attach: Any = None
+
+    def set_connection_controls(self, detach, attach) -> None:
+        """Wire operator stream detach/attach to the owning worker.
+
+        The control plane never owns the connection; it only forwards the
+        request to the worker's runtime, which tears down or re-establishes
+        the stream through its normal recovery paths.
+        """
+
+        self._on_detach = detach
+        self._on_attach = attach
 
     @property
     def automation_enabled(self) -> bool:
@@ -432,6 +445,12 @@ class PersistentControlPlane:
             return self.controls()
         if command == "report-scene":
             return self.report_scene(dict(payload.get("arguments", {})))
+        if command in {"connect", "disconnect"}:
+            handler = self._on_attach if command == "connect" else self._on_detach
+            if handler is None:
+                return {"ok": False, "error": "ConnectionControlUnavailable"}
+            handler()
+            return {"ok": True, "command": command}
         if command == "snapshot":
             if not self.allow_frame_export:
                 return {"ok": False, "error": "FrameExportDisabled"}

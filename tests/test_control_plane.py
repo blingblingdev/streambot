@@ -184,5 +184,34 @@ class ControlPlaneTests(unittest.TestCase):
                 plane.close()
 
 
+    def test_connect_and_disconnect_forward_to_the_worker(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            calls: list[str] = []
+            plane.set_connection_controls(
+                lambda: calls.append("detach"), lambda: calls.append("attach")
+            )
+            plane.start()
+            try:
+                disconnect = send_control_command(plane.socket_path, "disconnect")
+                connect = send_control_command(plane.socket_path, "connect")
+            finally:
+                plane.close()
+        self.assertTrue(disconnect["ok"])
+        self.assertTrue(connect["ok"])
+        self.assertEqual(calls, ["detach", "attach"])
+
+    def test_connection_commands_fail_closed_when_unwired(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            plane.start()
+            try:
+                response = send_control_command(plane.socket_path, "disconnect")
+            finally:
+                plane.close()
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], "ConnectionControlUnavailable")
+
+
 if __name__ == "__main__":
     unittest.main()

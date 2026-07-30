@@ -276,6 +276,8 @@
       <div class="tab" data-view="logs">Logs</div>
     </div>
     <button class="ghost sm" id="btnJobs">Jobs <span class="mono" id="jobsBadge">0</span></button>
+    <button class="ghost" id="btnDetach" style="display:none">Disconnect stream</button>
+    <button class="ghost" id="btnAttach" style="display:none">Connect stream</button>
     <button class="primary" id="btnStart">Start worker</button>
     <button class="danger" id="btnStop" disabled>Stop worker</button>
   </header>
@@ -399,11 +401,17 @@ function render(payload){
     const observing = conn.state === "observing";
 
     // header
-    $("workerState").textContent = worker.pid!=null ? `connected · pid ${worker.pid}`
+    const detached = conn.state === "detached";
+    const streaming = conn.state === "observing" || conn.state === "acting";
+    $("workerState").textContent = worker.pid!=null
+      ? `${conn.state || "connected"} · pid ${worker.pid}`
       : worker.socket_present ? "connected (external)" : "stopped";
     setLed($("railLed"), observing ? "ok" : worker.pid!=null ? "warn" : "");
     $("btnStart").disabled = worker.pid!=null || worker.socket_present;
     $("btnStop").disabled = worker.pid==null;
+    // Stream-level controls: only meaningful while a worker is reachable.
+    $("btnDetach").style.display = worker.socket_present && streaming ? "" : "none";
+    $("btnAttach").style.display = worker.socket_present && detached ? "" : "none";
 
     // Situation banner: driven by the worker's typed self-diagnosis, never
     // guessed from process state (the old heuristic showed a scary permission
@@ -416,6 +424,7 @@ function render(payload){
       host_busy: 'Another application owns the host streaming session; the worker will not displace it and connects automatically when that session ends.',
       waiting_host: 'The Sunshine host is not visible right now (asleep or offline); the worker is waiting and connects as soon as it reappears.',
       failed: 'The worker stopped after repeated reconnect failures. Check last_error on the Logs tab, fix the cause, and start it again.',
+      detached: 'Stream disconnected by operator: the worker is alive but holds no host connection. Use "Connect stream" to reattach.',
     };
     if (situationBanners[s.situation]){
       b.innerHTML = situationBanners[s.situation];
@@ -789,6 +798,11 @@ $("btnStart").onclick=async()=>{ const r=await post("/api/worker/start");
   toast(r.ok?"Worker starting":`Start failed: ${r.error||"error"}`); };
 $("btnStop").onclick=async()=>{ const r=await post("/api/worker/stop");
   toast(r.ok?"Worker stopped":`Stop failed: ${r.error||"error"}`); };
+$("btnDetach").onclick=async()=>{ const r=await post("/api/worker/disconnect");
+  toast(r.ok?"Stream disconnecting":r.error==="JobRunning"
+    ?"Stop the running job first":`Disconnect failed: ${r.error||"error"}`); };
+$("btnAttach").onclick=async()=>{ const r=await post("/api/worker/connect");
+  toast(r.ok?"Stream connecting":`Connect failed: ${r.error||"error"}`); };
 $("rjobStop").onclick=async()=>{
   if (!runningJobName) return;
   const btn=$("rjobStop"); btn.disabled=true;

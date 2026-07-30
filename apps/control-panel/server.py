@@ -641,6 +641,8 @@ def classify_situation(
     if ipc_present:
         if state in {"observing", "acting"}:
             return "connected"
+        if state == "detached":
+            return "detached"
         if state == "waiting":
             if last_error_code == "desktop_session_inactive":
                 return "waiting_desktop_session"
@@ -827,6 +829,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/worker/stop":
             self._send_json(supervisor.stop())
+            return
+        if self.path == "/api/worker/disconnect":
+            # Detach the stream but keep the worker process and IPC alive.
+            # Refused while a job is running: jobs drive input through this
+            # worker's connection and would fail mid-flight without it.
+            if any(job.get("running") for job in self.console.jobs.status()):
+                self._send_json({"ok": False, "error": "JobRunning"}, code=409)
+                return
+            self._ipc("disconnect", {})
+            return
+        if self.path == "/api/worker/connect":
+            self._ipc("connect", {})
             return
         if self.path == "/api/jobs/start":
             name = str(self._read_json().get("name", ""))
