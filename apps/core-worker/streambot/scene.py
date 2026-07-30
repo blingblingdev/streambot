@@ -758,6 +758,14 @@ class SceneEngine:
                     )
             elif kind == "each-point":
                 start = int(spec.get("start_index", 0))
+                # A rail whose numbering depends on its scroll position reports
+                # the first visible item's number through this context key; see
+                # control_surface._each_point_extractor for the same contract.
+                start_source = spec.get("start_index_source")
+                if start_source is not None:
+                    dynamic = ctx.external.get(str(start_source))
+                    if dynamic is not None:
+                        start = int(dynamic)
                 for offset, point in enumerate(ctx.external.get(spec["source"], ())):
                     produced.append(
                         ControlFact(

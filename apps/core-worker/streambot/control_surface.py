@@ -77,11 +77,22 @@ def _each_point_extractor(
     The candidate points are supplied by the target through `context[source]` as
     an iterable of (x, y) pairs, keeping target-specific detection out of the
     platform. Confidence is a per-layout constant.
+
+    `start_index` numbers the produced controls. A layout whose numbering
+    depends on what is on screen (a scrollable rail that shows items 1-5 in one
+    position and 3-6 in another) names a context key with `start_index_source`
+    instead; the target reports the first visible item's number there and the
+    fixed `start_index` becomes the fallback.
     """
 
     points = context.get(params["source"], ())
     confidence = float(params.get("confidence", 1.0))
     start = int(params.get("start_index", 0))
+    source_key = params.get("start_index_source")
+    if source_key is not None:
+        dynamic = context.get(str(source_key))
+        if dynamic is not None:
+            start = int(dynamic)
     return tuple(
         (start + offset, int(x), int(y), confidence)
         for offset, (x, y) in enumerate(points)
