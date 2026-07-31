@@ -159,3 +159,14 @@ So:
 - Anything else — a probe, a measurement, a single-step experiment — is fine
   to run directly, but it must be short-lived and must not be how the work
   itself gets done.
+
+## Recover, do not wait
+
+A job that drives an application must be able to put it back. If the game is
+closed, closed by mistake, or crashed, the job starts it again — from Steam,
+from the launcher, however it starts — and carries on. Stopping to ask
+permission for something ordinary and reversible turns one mistake into hours
+of nothing happening, which is worse than the mistake.
+
+Ask before actions that are hard to undo or that reach outside the machine.
+Restarting an application the job already drives is neither.
