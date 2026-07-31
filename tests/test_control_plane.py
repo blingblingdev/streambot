@@ -257,3 +257,36 @@ class TraceCommandTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"], "TooFewPoints")
         self.assertEqual([call for call in calls if call[0] == "execute"], [])
+
+
+class DoubleClickTests(unittest.TestCase):
+    """Two clicks at one point, close enough to read as one gesture."""
+
+    def test_it_glides_once_and_clicks_twice(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            inputs = FakeInputs()
+            plane.start()
+            response: dict[str, object] = {}
+
+            def request() -> None:
+                response.update(
+                    send_control_command(
+                        plane.socket_path,
+                        "double-click",
+                        arguments={"x": 40, "y": 50, "gap_seconds": 0.02},
+                    )
+                )
+
+            thread = Thread(target=request)
+            thread.start()
+            deadline = time.monotonic() + 3.0
+            while thread.is_alive() and time.monotonic() < deadline:
+                plane.execute_pending(inputs)
+                time.sleep(0.005)
+            thread.join(timeout=1.0)
+            plane.close()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(inputs.calls[0][:3], ("glide", 40, 50))
+        self.assertEqual([c[1] for c in inputs.calls if c[0] == "execute"], ["click", "click"])

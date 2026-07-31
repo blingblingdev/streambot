@@ -52,6 +52,7 @@ class PersistentControlPlane:
         "hold-click",
         "drag",
         "trace",
+        "double-click",
         "escape",
         "backspace",
         "enter",
@@ -269,6 +270,18 @@ class PersistentControlPlane:
             inputs.execute_move(
                 int(args["dx"]), int(args["dy"]), f"{key}-move-rel"
             )
+            return {"ok": True, "command": command}
+        if command == "double-click":
+            # Two clicks close enough together that the target reads them as
+            # one gesture. Sending two separate click commands cannot do it:
+            # each glides to the point first, and the gap between them is
+            # whatever the socket and the worker thread happen to cost.
+            x, y = int(args["x"]), int(args["y"])
+            gap = min(0.3, max(0.02, float(args.get("gap_seconds", 0.09))))
+            inputs.execute_glide(x, y, f"{key}-point")
+            inputs.execute("click", f"{key}-click-1")
+            time.sleep(gap)
+            inputs.execute("click", f"{key}-click-2")
             return {"ok": True, "command": command}
         if command == "trace":
             # Press once, move through every waypoint, release once. A drag is
