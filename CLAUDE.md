@@ -122,6 +122,33 @@ example profiles.
   identity. Pair each worker as a separate client identity.
 - Default experiments to low cost (1280x720, 15 FPS, H.264, modest bitrate).
 
+## Jobs run under the console, never beside it
+
+**Every automation run must be started through the job the console knows
+about.** `apps/control-panel` builds its list from `JOBS_ROOT/<name>/job.json`
+and decides whether a job is running by matching `pgrep -f` against the
+`runner` path that manifest declares. A process started any other way — a
+shell loop, a one-off `python jobs/.../something.py`, a background command —
+is invisible to it: not listed as running, not stoppable from the panel, and
+not attributable to the job.
+
+That is not a cosmetic gap. It means the operator cannot see what is driving
+the machine, cannot stop it, and two runs can fight over the same stream
+without either noticing.
+
+So:
+
+- One entry point per job, named in `job.json` as `runner`, and it is the only
+  way that automation starts. If a run needs arguments, the runner takes them.
+- Start it from the console, or by invoking exactly that runner path so the
+  console adopts it. Never wrap it in another script — `pgrep` matches the
+  path it was told about, and a wrapper hides it.
+- A runner handles SIGTERM and stops cleanly, because the panel's stop button
+  sends one.
+- Anything else — a probe, a measurement, a single-step experiment — is fine
+  to run directly, but it must be short-lived and must not be how the work
+  itself gets done.
+
 ## Conventions
 
 - All code comments, documentation, and commit messages in English.
