@@ -51,6 +51,7 @@ class PersistentControlPlane:
         "press",
         "hold-click",
         "drag",
+        "trace",
         "escape",
         "backspace",
         "enter",
@@ -269,6 +270,30 @@ class PersistentControlPlane:
                 int(args["dx"]), int(args["dy"]), f"{key}-move-rel"
             )
             return {"ok": True, "command": command}
+        if command == "trace":
+            # Press once, move through every waypoint, release once. A drag is
+            # a straight line by design; some tools want a PATH — Poly Bridge's
+            # freehand tool lays a chain of joints along whatever curve the
+            # pointer follows, and a curved deck cannot be produced by clicking
+            # its joints one at a time. Chaining short drags will not do: each
+            # one releases the button and ends the stroke.
+            points = [(int(px), int(py)) for px, py in args["points"]]
+            if len(points) < 2:
+                return {"ok": False, "error": "TooFewPoints", "command": command}
+            duration = min(4.0, max(0.1, float(args.get("duration_seconds", 1.0))))
+            step = duration / max(1, len(points) - 1)
+            inputs.execute_position(points[0][0], points[0][1], f"{key}-point")
+            time.sleep(0.1)
+            inputs.execute("mouse-down", f"{key}-down")
+            try:
+                for index, (px, py) in enumerate(points[1:], start=1):
+                    if self._stop.is_set():
+                        break
+                    time.sleep(step)
+                    inputs.execute_position(px, py, f"{key}-move-{index}")
+            finally:
+                inputs.execute("mouse-up", f"{key}-up")
+            return {"ok": True, "command": command, "points": len(points)}
         if command in {"point", "click", "hold-click", "drag"}:
             x, y = int(args["x"]), int(args["y"])
             # Natural trajectory to the target before pressing; drag keeps its

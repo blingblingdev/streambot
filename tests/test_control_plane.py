@@ -215,3 +215,45 @@ class ControlPlaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TraceCommandTests(unittest.TestCase):
+    """A path, not a straight line: one press, many moves, one release."""
+
+    def _run(self, arguments: dict) -> tuple[dict, list]:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            inputs = FakeInputs()
+            plane.start()
+            response: dict[str, object] = {}
+
+            def request() -> None:
+                response.update(
+                    send_control_command(plane.socket_path, "trace", arguments=arguments)
+                )
+
+            thread = Thread(target=request)
+            thread.start()
+            deadline = time.monotonic() + 5.0
+            while thread.is_alive() and time.monotonic() < deadline:
+                plane.execute_pending(inputs)
+                time.sleep(0.005)
+            thread.join(timeout=2.0)
+            plane.close()
+            return response, inputs.calls
+
+    def test_the_button_is_held_for_the_whole_path(self) -> None:
+        response, calls = self._run(
+            {"points": [[10, 10], [20, 30], [40, 25]], "duration_seconds": 0.2}
+        )
+        self.assertTrue(response["ok"])
+        actions = [call for call in calls if call[0] == "execute"]
+        self.assertEqual([call[1] for call in actions], ["mouse-down", "mouse-up"])
+        moves = [call for call in calls if call[0] == "position"]
+        self.assertEqual([(call[1], call[2]) for call in moves], [(10, 10), (20, 30), (40, 25)])
+
+    def test_a_path_needs_at_least_two_points(self) -> None:
+        response, calls = self._run({"points": [[10, 10]]})
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], "TooFewPoints")
+        self.assertEqual([call for call in calls if call[0] == "execute"], [])
