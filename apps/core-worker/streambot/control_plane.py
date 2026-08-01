@@ -53,6 +53,7 @@ class PersistentControlPlane:
         "drag",
         "trace",
         "double-click",
+        "type",
         "escape",
         "backspace",
         "enter",
@@ -270,6 +271,9 @@ class PersistentControlPlane:
             inputs.execute_move(
                 int(args["dx"]), int(args["dy"]), f"{key}-move-rel"
             )
+            return {"ok": True, "command": command}
+        if command == "type":
+            inputs.execute_text(str(args["text"]), f"{key}-type")
             return {"ok": True, "command": command}
         if command == "double-click":
             # Two clicks close enough together that the target reads them as

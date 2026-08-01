@@ -24,6 +24,24 @@ KEY_ACTION_UP = 0x04
 BUTTONS = {"left": 0x01, "middle": 0x02, "right": 0x03, "x1": 0x04, "x2": 0x05}
 MODIFIERS = {"shift": 0x01, "ctrl": 0x02, "alt": 0x04, "meta": 0x08}
 
+# Windows virtual key codes for the characters a URL or a file name needs.
+# Typing exists because some work cannot be done by clicking: a guide that
+# has to be fetched lives at an address, and an address has to be typed.
+_TYPE_KEYS: dict[str, tuple[int, bool]] = {
+    **{chr(c): (c - 32, False) for c in range(ord("a"), ord("z") + 1)},
+    **{chr(c): (c, True) for c in range(ord("A"), ord("Z") + 1)},
+    **{d: (0x30 + int(d), False) for d in "0123456789"},
+    " ": (0x20, False), "-": (0xBD, False), "=": (0xBB, False),
+    ".": (0xBE, False), "/": (0xBF, False), ";": (0xBA, False),
+    "'": (0xDE, False), ",": (0xBC, False), "[": (0xDB, False),
+    "]": (0xDD, False), "\\": (0xDC, False), "`": (0xC0, False),
+    ":": (0xBA, True), "?": (0xBF, True), "_": (0xBD, True),
+    "+": (0xBB, True), "&": (0x37, True), "%": (0x35, True),
+    "#": (0x33, True), "@": (0x32, True), "!": (0x31, True),
+    "~": (0xC0, True), "(": (0x39, True), ")": (0x30, True),
+}
+
+
 INPUT_CDEF = """
 int LiSendMouseMoveEvent(short deltaX, short deltaY);
 int LiSendMousePositionEvent(short x, short y, short referenceWidth, short referenceHeight);
@@ -234,6 +252,40 @@ class SafeInputDriver:
                 raise
             self._completed_keys.add(idempotency_key)
             self.actions_completed += 1
+
+
+    def execute_text(self, text: str, idempotency_key: str) -> None:
+        """Type a short string, one key at a time, under the same rails.
+
+        Every character is a key down and up through the ordinary transport,
+        so the per-minute limit, the dry-run switch and the held-key tracking
+        all apply exactly as they do to a click. Characters with no mapping
+        are skipped rather than guessed at — a wrong key in an address is
+        worse than a missing one, because it goes somewhere.
+        """
+
+        with self._lock:
+            if not idempotency_key:
+                raise InputError("idempotency key is required")
+            if idempotency_key in self._completed_keys:
+                return
+            if len(text) > 512:
+                raise InputError("text is too long to type")
+            # One rate check for the whole string: typing an address is one
+            # action from the operator's point of view, and charging it per
+            # character would trip the limit on a single URL.
+            self._check_rate()
+            for character in text:
+                mapping = _TYPE_KEYS.get(character)
+                if mapping is None:
+                    continue
+                key_code, shifted = mapping
+                modifiers = MODIFIERS["shift"] if shifted else 0
+                if self._safety.dry_run:
+                    continue
+                self._send(self._transport.keyboard, key_code, KEY_ACTION_DOWN, modifiers)
+                self._send(self._transport.keyboard, key_code, KEY_ACTION_UP, modifiers)
+            self._completed_keys.add(idempotency_key)
 
     def execute_position(self, x: int, y: int, idempotency_key: str) -> None:
         """Execute one bounded dynamic absolute pointer action safely."""

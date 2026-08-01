@@ -31,6 +31,9 @@ class FakeInputs:
     def execute_glide(self, x: int, y: int, key: str) -> None:
         self.calls.append(("glide", x, y, key))
 
+    def execute_text(self, text: str, key: str) -> None:
+        self.calls.append(("text", text, key))
+
 
 class ControlPlaneTests(unittest.TestCase):
     def test_default_socket_path_is_generic(self) -> None:
@@ -290,3 +293,33 @@ class DoubleClickTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(inputs.calls[0][:3], ("glide", 40, 50))
         self.assertEqual([c[1] for c in inputs.calls if c[0] == "execute"], ["click", "click"])
+
+
+class TypeCommandTests(unittest.TestCase):
+    """Typing exists because an address cannot be clicked."""
+
+    def test_each_character_is_a_key_down_and_up(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            inputs = FakeInputs()
+            plane.start()
+            response: dict[str, object] = {}
+
+            def request() -> None:
+                response.update(
+                    send_control_command(
+                        plane.socket_path, "type", arguments={"text": "ab1"}
+                    )
+                )
+
+            thread = Thread(target=request)
+            thread.start()
+            deadline = time.monotonic() + 3.0
+            while thread.is_alive() and time.monotonic() < deadline:
+                plane.execute_pending(inputs)
+                time.sleep(0.005)
+            thread.join(timeout=1.0)
+            plane.close()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual([c[1] for c in inputs.calls], ["ab1"])
