@@ -318,6 +318,42 @@ class SafeInputDriver:
             self._completed_keys.add(idempotency_key)
             self.actions_completed += 1
 
+    def execute_scroll(self, clicks: int, idempotency_key: str) -> None:
+        """Scroll the wheel, under the same rails as every other action.
+
+        The transport has carried scroll since the beginning — the driver
+        already knows the action kind — but nothing above it could ask for
+        one, so a job could click and type and drag and not turn a wheel.
+        Poly Bridge zooms on the wheel, and a level drawn at the zoom it
+        happens to open at puts members below the game's minimum length.
+
+        One rate check for the whole gesture: a zoom is one action from the
+        operator's point of view, however many clicks it takes.
+        """
+
+        with self._lock:
+            if not idempotency_key:
+                raise InputError("idempotency key is required")
+            if not isinstance(clicks, int):
+                raise InputError("scroll clicks must be an integer")
+            if not -32 <= clicks <= 32:
+                raise InputError("scroll clicks are out of range")
+            if idempotency_key in self._completed_keys:
+                self.actions_suppressed += 1
+                return
+            self._check_rate()
+            if self._safety.dry_run:
+                self._completed_keys.add(idempotency_key)
+                self.actions_completed += 1
+                return
+            if not self._transport.is_connected:
+                raise InputTransportError("Moonlight input transport is disconnected")
+            step = 1 if clicks > 0 else -1
+            for _ in range(abs(clicks)):
+                self._send(self._transport.scroll, step)
+            self._completed_keys.add(idempotency_key)
+            self.actions_completed += 1
+
     def _glide_path(
         self, start: tuple[int, int], end: tuple[int, int]
     ) -> list[tuple[int, int]]:

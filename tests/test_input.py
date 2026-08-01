@@ -205,6 +205,39 @@ class SafeInputDriverTests(unittest.TestCase):
         self.assertEqual(subject.actions_completed, 1)
         self.assertEqual(subject.actions_suppressed, 1)
 
+    def test_execute_scroll_sends_one_event_per_click(self) -> None:
+        """A zoom is one action however many clicks it takes."""
+
+        transport = FakeTransport()
+        subject = driver((action("move", "mouse_move", dx=1, dy=1),), transport)
+
+        subject.execute_scroll(3, "zoom-in")
+
+        self.assertEqual(
+            transport.events, [("scroll", 1), ("scroll", 1), ("scroll", 1)]
+        )
+        self.assertEqual(subject.actions_completed, 1)
+
+    def test_execute_scroll_goes_down_and_is_idempotent(self) -> None:
+        transport = FakeTransport()
+        subject = driver((action("move", "mouse_move", dx=1, dy=1),), transport)
+
+        subject.execute_scroll(-2, "zoom-out")
+        subject.execute_scroll(-2, "zoom-out")
+
+        self.assertEqual(transport.events, [("scroll", -1), ("scroll", -1)])
+        self.assertEqual(subject.actions_suppressed, 1)
+
+    def test_execute_scroll_rejects_absurd_distances(self) -> None:
+        """Out of range fails closed rather than spinning the wheel forever."""
+
+        subject = driver((action("move", "mouse_move", dx=1, dy=1),), FakeTransport())
+
+        with self.assertRaises(InputError):
+            subject.execute_scroll(500, "far-too-far")
+        with self.assertRaises(InputError):
+            subject.execute_scroll("3", "not-a-number")
+
     def test_relative_absolute_scroll_and_click_mapping(self) -> None:
         transport = FakeTransport()
         subject = driver(

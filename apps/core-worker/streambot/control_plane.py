@@ -54,6 +54,7 @@ class PersistentControlPlane:
         "trace",
         "double-click",
         "type",
+        "scroll",
         "escape",
         "backspace",
         "enter",
@@ -346,6 +347,10 @@ class PersistentControlPlane:
                         )
                 finally:
                     inputs.execute("mouse-up", f"{key}-up")
+        elif command == "scroll":
+            clicks = int(args["clicks"])
+            inputs.execute_scroll(clicks, f"{key}-scroll")
+            return {"ok": True, "command": "scroll", "clicks": clicks}
         elif command == "press":
             inputs.execute("click", f"{key}-click")
         elif command in {"escape", "backspace", "enter", "fast-forward"}:
