@@ -24,6 +24,7 @@ from PIL import Image
 
 from streambot.input import SafeInputDriver
 from streambot.observation import Observation
+from streambot.watchdog import StallWatchdog
 
 
 DEFAULT_SOCKET_PATH = Path(".state/poc/control.sock")
@@ -95,6 +96,40 @@ class PersistentControlPlane:
         self._commands_completed = 0
         self._on_detach: Any = None
         self._on_attach: Any = None
+        # Every operation a job performs passes through here, so this is the
+        # one place that can tell working from stopped. A job that has frozen
+        # keeps its process, its socket and its log; only the silence gives
+        # it away.
+        self._watchdog = StallWatchdog(on_stall=self._report_stall)
+        self._on_stall: Any = None
+
+    def set_stall_alarm(self, on_stall, timeout_seconds: float | None = None) -> None:
+        """Call `on_stall(idle_seconds, last_command)` after too long a silence.
+
+        The timeout is the caller's to choose, because what counts as too
+        long is: a job drawing a bridge clicks several times a second, while
+        one waiting for a person to take a turn may be right to sit still for
+        ten minutes. Defaults to STREAMBOT_STALL_SECONDS.
+        """
+
+        self._on_stall = on_stall
+        if timeout_seconds is not None:
+            self._watchdog.timeout_seconds = float(timeout_seconds)
+        self._watchdog.start()
+
+    def _report_stall(self, idle_seconds: float, last_command: str) -> None:
+        if self._on_stall is None:
+            return
+        try:
+            self._on_stall(idle_seconds, last_command)
+        except Exception:
+            pass  # an alarm must never be what stops the work
+
+    @property
+    def idle_seconds(self) -> float:
+        """How long since anything was actually sent to the game."""
+
+        return self._watchdog.idle_seconds()
 
     def set_connection_controls(self, detach, attach) -> None:
         """Wire operator stream detach/attach to the owning worker.
@@ -512,6 +547,10 @@ class PersistentControlPlane:
             return {"ok": True, "frame_number": frame_number, "output": str(output)}
         if command not in self.ACTION_COMMANDS:
             return {"ok": False, "error": "UnsupportedCommand"}
+        # An action, not a look: snapshots and status are how the job WATCHES
+        # the game, and counting them as activity would mean a job that has
+        # frozen while polling the screen never trips the alarm.
+        self._watchdog.touch(command)
         request_id = str(payload.get("id") or uuid4().hex)
         pending = PendingCommand(request_id, command, dict(payload.get("arguments", {})))
         self._commands.put(pending, timeout=0.5)
