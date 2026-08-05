@@ -50,6 +50,21 @@ from streambot.job_config import (  # noqa: E402
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LOG_DIR = PROJECT_ROOT / ".state" / "control-panel"
 
+# What the console will serve out of `static/`. An allowlist rather than
+# `mimetypes.guess_type`, so a stray file in the build output cannot turn the
+# operator console into a general-purpose file server.
+STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+}
+
 # Jobs can live outside this checkout (a separately managed jobs repository).
 # STREAMBOT_JOBS_DIR (or --jobs-dir) points at the directory holding
 # <name>/job.json entries; runner paths in job.json resolve against that
@@ -870,12 +885,50 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_file(self, path: Path, content_type: str) -> None:
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError:
+            # A missing or unreadable asset is a 404, not a traceback out of
+            # the handler and a dead connection.
+            self._send_json({"ok": False, "error": "NotFound"}, code=404)
+            return
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        # The page and its assets are served from disk on every request, which
+        # is what makes editing the console and reloading enough. Hashed
+        # bundle assets may be cached; the entry document may not.
+        self.send_header(
+            "Cache-Control",
+            "public, max-age=31536000, immutable"
+            if "/assets/" in path.as_posix()
+            else "no-store",
+        )
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_static(self, route: str) -> bool:
+        """Serve `route` from STATIC_DIR. False if it is not a static asset.
+
+        The console is a local operator tool, but a path is still untrusted
+        input: the resolved file must sit inside STATIC_DIR, so `..` cannot
+        walk out into the checkout, and only known asset types are served.
+        """
+
+        relative = route.lstrip("/")
+        if not relative or relative == "index.html":
+            self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
+            return True
+        candidate = (STATIC_DIR / relative).resolve()
+        try:
+            candidate.relative_to(STATIC_DIR.resolve())
+        except ValueError:
+            return False  # escaped the static directory
+        content_type = STATIC_TYPES.get(candidate.suffix.lower())
+        if content_type is None or not candidate.is_file():
+            return False
+        self._send_file(candidate, content_type)
+        return True
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -892,9 +945,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         route = self.path.split("?", 1)[0]  # ignore query string when routing
-        if route in ("/", "/index.html"):
-            self._send_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
-            return
+        if route == "/" or not route.startswith("/api/"):
+            # The page and every built asset. Anything that is not a real file
+            # under static/ falls through to the 404 at the end.
+            if self._send_static(route):
+                return
         if route == "/api/status":
             self._send_json(self.console.status())
             return
@@ -919,23 +974,20 @@ class Handler(BaseHTTPRequestHandler):
             name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
             self._send_json(self.console.jobs.config(name))
             return
-        if route == "/vendor/echarts.min.js":
-            self._send_file(
-                STATIC_DIR / "vendor" / "echarts.min.js",
-                "application/javascript; charset=utf-8",
-            )
-            return
         self._send_json({"ok": False, "error": "NotFound"}, code=404)
 
     def do_POST(self) -> None:
         supervisor = self.console.supervisor
-        if self.path == "/api/worker/start":
+        # Routed the same way as GET. These used to match `self.path` whole,
+        # so a trailing query string would have fallen through to a 404.
+        route = self.path.split("?", 1)[0]
+        if route == "/api/worker/start":
             self._send_json(supervisor.start())
             return
-        if self.path == "/api/worker/stop":
+        if route == "/api/worker/stop":
             self._send_json(supervisor.stop())
             return
-        if self.path == "/api/worker/disconnect":
+        if route == "/api/worker/disconnect":
             # Detach the stream but keep the worker process and IPC alive.
             # Refused while a job is running: jobs drive input through this
             # worker's connection and would fail mid-flight without it.
@@ -944,18 +996,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._ipc("disconnect", {})
             return
-        if self.path == "/api/worker/connect":
+        if route == "/api/worker/connect":
             self._ipc("connect", {})
             return
-        if self.path == "/api/jobs/start":
+        if route == "/api/jobs/start":
             name = str(self._read_json().get("name", ""))
             self._send_json(self.console.jobs.start(name))
             return
-        if self.path == "/api/jobs/stop":
+        if route == "/api/jobs/stop":
             name = str(self._read_json().get("name", ""))
             self._send_json(self.console.jobs.stop(name))
             return
-        if self.path == "/api/jobs/config":
+        if route == "/api/jobs/config":
             body = self._read_json()
             name = str(body.get("name", ""))
             values = body.get("values")
@@ -964,11 +1016,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(self.console.jobs.set_config(name, values))
             return
-        if self.path == "/api/automation":
+        if route == "/api/automation":
             enabled = bool(self._read_json().get("enabled"))
             self._ipc("set-automation", {"enabled": enabled})
             return
-        if self.path == "/api/dispatch":
+        if route == "/api/dispatch":
             control_id = str(self._read_json().get("control_id", ""))
             if not control_id:
                 self._send_json({"ok": False, "error": "MissingControlId"}, code=400)
