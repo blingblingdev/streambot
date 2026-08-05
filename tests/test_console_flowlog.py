@@ -115,36 +115,13 @@ class FeedDomBoundTest(unittest.TestCase):
     """The browser event feed must never grow without bound.
 
     The server already rings its recent-event buffer, but the browser
-    accumulates appended rows across hours — the DOM row cap is the guard,
-    and this test pins both the cap and the trim so neither is lost in a
-    frontend refactor.
+    accumulates appended rows across hours — the cap is the guard.
+
+    The cap and the trimming now live in the console's TypeScript
+    (`apps/control-panel/ui/src/lib/timeline.ts`) and are tested there, by
+    `bun test`, where the behaviour can be exercised instead of grepped for.
+    What remains here is the half of the guard that is genuinely server-side.
     """
-
-    HTML = (
-        Path(__file__).resolve().parent.parent
-        / "apps" / "control-panel" / "static" / "index.html"
-    )
-
-    def test_feed_row_cap_exists_and_is_reasonable(self) -> None:
-        html = self.HTML.read_text(encoding="utf-8")
-        match = re.search(r"FEED_MAX_ROWS\s*=\s*(\d+)", html)
-        self.assertIsNotNone(match, "feed row cap constant missing")
-        self.assertLessEqual(int(match.group(1)), 500)
-
-    def test_feed_trims_oldest_rows_past_the_cap(self) -> None:
-        # Pins the behaviour — bounded by the cap, dropped from the front —
-        # rather than the exact wording, so the guard survives the feed being
-        # reshaped but not the trim being removed.
-        html = self.HTML.read_text(encoding="utf-8")
-        match = re.search(
-            r"while \(box\.children\.length > FEED_MAX_ROWS\)\s*\{?(.{0,400}?)\}",
-            html,
-            re.S,
-        )
-        self.assertIsNotNone(match, "feed trim loop missing")
-        body = match.group(1)
-        self.assertIn("box.firstChild", body)
-        self.assertIn("box.removeChild", body)
 
     def test_chart_history_is_hard_capped_server_side(self) -> None:
         # Chart history now lives on the server; hours of dense events must

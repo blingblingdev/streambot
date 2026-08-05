@@ -175,7 +175,10 @@ The bounded probes live under `scripts/` (`live_probe.py <phase>`,
 
 ## Tests
 
-The suite uses the stdlib `unittest` runner (there is no pytest):
+The console's browser code has its own suite (`cd apps/control-panel/ui &&
+bun test`); the Python suite checks that its built output is present and not
+older than its sources. The Python suite uses the stdlib `unittest` runner
+(there is no pytest):
 
 ```bash
 .venv/bin/python -m unittest discover -s tests      # full suite

@@ -19,6 +19,14 @@ import index from "./index.html";
 const CONSOLE = process.env.STREAMBOT_CONSOLE ?? "http://127.0.0.1:8787";
 const PORT = Number(process.env.PORT ?? 5173);
 
+// Tailwind produces the stylesheet the page links; keep it rebuilding while
+// the server runs so editing a class is as immediate as editing a component.
+const styles = Bun.spawn(
+  ["bun", "run", "tailwindcss", "-i", "src/index.css", "-o", "generated.css", "--watch"],
+  { cwd: import.meta.dir, stdout: "ignore", stderr: "inherit" },
+);
+process.on("exit", () => styles.kill());
+
 const server = Bun.serve({
   port: PORT,
   development: { hmr: true },

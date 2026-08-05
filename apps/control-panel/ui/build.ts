@@ -56,7 +56,7 @@ const html = template
     '<script type="module" src="./src/main.tsx"></script>',
     `<script type="module" src="/assets/${scriptName}"></script>`,
   )
-  .replace("</head>", `  <link rel="stylesheet" href="/assets/${cssName}" />\n  </head>`);
+  .replace('<link rel="stylesheet" href="./generated.css" />', `<link rel="stylesheet" href="/assets/${cssName}" />`);
 await writeFile(`${outdir}/index.html`, html, "utf8");
 
 const bytes = (await Promise.all(

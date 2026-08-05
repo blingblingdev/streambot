@@ -79,3 +79,26 @@ Then open `http://127.0.0.1:8787/`. Options: `--port`, `--state-dir`
 - Keeps no host address, pairing identifier, or credential on disk or in
   responses — the same metadata-only surface as the CLI.
 - Automation stays paused until you explicitly resume it.
+
+## Working on the console itself
+
+The browser code is React + TypeScript + Tailwind under `ui/`, built by bun
+into `static/`, and **that build output is committed**. The console is the
+process that holds the macOS Local Network grant the worker inherits, so
+launching it must never come to require a JavaScript toolchain.
+
+```bash
+cd apps/control-panel/ui
+bun install
+bun run dev        # http://127.0.0.1:5173, proxying /api to the real console
+bun test           # phase maths, feed trimming, popover placement, formatters
+bun run build      # rewrite static/ — commit the result
+```
+
+Develop against a console that is actually running: `bun run dev` proxies every
+`/api` call to it, so the UI is built against a live worker and a live job
+rather than fixtures. `server.py` sends no CORS headers by design, which is why
+this is a proxy rather than a direct cross-origin call.
+
+The Python suite fails if `static/` is older than `ui/src`, so a forgotten
+rebuild is caught by the tests rather than by a browser showing an old console.

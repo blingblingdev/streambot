@@ -27,7 +27,17 @@ globally.
 ./scripts/self_check.py         # offline validation: no network, pairing, or input
 ```
 
-Tests use the stdlib `unittest` runner (there is no pytest):
+The console's browser code lives in `apps/control-panel/ui` (React +
+TypeScript + Tailwind, built by bun) and has its own runner:
+
+```bash
+cd apps/control-panel/ui
+bun run dev        # the UI with hot reload, proxying /api to a running console
+bun test           # the console's own unit tests
+bun run build      # rebuild static/ — commit the result
+```
+
+Python tests use the stdlib `unittest` runner (there is no pytest):
 
 ```bash
 .venv/bin/python -m unittest discover -s tests      # full suite
@@ -106,7 +116,11 @@ platform, importable from the project venv via a `.pth` entry created by
 - `config.py`, `models.py`, `events.py`, `ocr.py`,
   `scene.py`, `control_surface.py` — supporting types and adapters.
 
-`apps/control-panel/` is the local operator console. `jobs/` holds pluggable,
+`apps/control-panel/` is the local operator console: `server.py` serves the
+built page and the IPC-backed API, `ui/` holds its React source, and
+`static/` holds the build output, which is committed so that launching the
+console never requires a JavaScript toolchain — it is the process that holds
+the macOS Local Network grant the worker inherits. `jobs/` holds pluggable,
 target-specific automation (see `jobs/README.md`); `profiles/` holds generic
 example profiles.
 
