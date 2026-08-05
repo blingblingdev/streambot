@@ -103,6 +103,7 @@ class JobClient:
         self.job_name = job_name
         self.socket_path = Path(socket_path) if socket_path else default_socket()
         self.last_error: str | None = None
+        self.last_act_ms: float | None = None
 
     def _call(self, command: str, arguments: dict[str, Any] | None = None) -> dict:
         try:
@@ -141,7 +142,10 @@ class JobClient:
         return response
 
     def click(self, x: int, y: int) -> bool:
-        return bool(self._call("click", {"x": int(x), "y": int(y)}).get("ok"))
+        started = time.perf_counter()
+        ok = bool(self._call("click", {"x": int(x), "y": int(y)}).get("ok"))
+        self.last_act_ms = round((time.perf_counter() - started) * 1000, 1)
+        return ok
 
     def press(self, key: str) -> bool:
         return bool(self._call(key, {}).get("ok"))
@@ -205,13 +209,18 @@ class PollContext:
             return False
         self.acted = True
         self._loop.clicks += 1
+        # The whole path that led here, so one line can be read end to end:
+        # the look that found the control, its two worker-side phases, and the
+        # click itself.
         self._loop.events.clicked(
             element=element,
             screen=self.screen,
             center=list(target.center),
             score=target.score,
+            perceive_ms=self._analysis.get("perceive_ms"),
             classify_ms=self._analysis.get("classify_ms"),
             resolve_ms=self._analysis.get("resolve_ms"),
+            act_ms=self._loop.client.last_act_ms,
         )
         return True
 

@@ -133,8 +133,37 @@
   .ev .ms { flex: none; font-variant-numeric: tabular-nums; }
   .ev .ms.ok { color: var(--ok); } .ev .ms.warn { color: var(--warn); }
   .ev .ms.bad { color: var(--bad); }
-  /* L = locate, T = total. One letter keeps two timings legible on one line. */
-  .ev .ms .tag { color: var(--faint); font-size: 9.5px; margin-right: 3px; }
+
+  /* A timeline: a spine down the feed, a dot per event, and for anything
+     timed, the round trip drawn as the phases it is actually made of.
+     Segment widths are proportional to their milliseconds, so the bar shows
+     where the time went without anyone reading four numbers. */
+  .feed .body { position: relative; }
+  .feed .body::before { content: ""; position: absolute; left: 22px;
+    top: 4px; bottom: 4px; width: 1px; background: var(--line); }
+  .feed .body .empty::before { display: none; }
+  .ev .dot { flex: none; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--line); box-shadow: 0 0 0 3px var(--panel); z-index: 1; }
+  .ev.perceive .dot { background: var(--faint); }
+  .ev.click .dot { background: var(--ok); }
+  .ev.cycle .dot { background: var(--blue); }
+  .ev.mile .dot { background: var(--live); }
+  .ev.warnrow .dot, .ev.endrow .dot { background: var(--bad); }
+  .ev .bar { flex: none; display: flex; width: 62px; height: 7px; gap: 1px;
+    border-radius: 2px; overflow: hidden; }
+  .ev .bar i { display: block; min-width: 1px; }
+  .ev .bar .tp { background: #3d444d; }   /* transport: the IPC round trip */
+  .ev .bar .cl { background: #2dd4bf; }   /* classify: which screen is this */
+  .ev .bar .lo { background: #a78bfa; }   /* locate: where is the control */
+  .ev .bar .ac { background: var(--ok); } /* click: the input itself */
+  .ev .tot { flex: none; width: 34px; text-align: right;
+    font-variant-numeric: tabular-nums; }
+  .ev .tot.ok { color: var(--ok); } .ev .tot.warn { color: var(--warn); }
+  .ev .tot.bad { color: var(--bad); }
+  .keys { display: inline-flex; align-items: center; gap: 9px; margin-left: 8px;
+    font-size: 9.5px; color: var(--faint); font-weight: 400; letter-spacing: 0; }
+  .keys span { display: inline-flex; align-items: center; gap: 3px; }
+  .keys i { width: 7px; height: 7px; border-radius: 2px; display: block; }
   .ev.click { background: rgba(63,185,80,.08); border-left-color: var(--ok);
     color: var(--text); padding: 5px 8px; }
   .ev.click .el { font-weight: 600; }
@@ -351,7 +380,12 @@
       </section>
 
       <section class="sec feed">
-        <h2>Perceive · Click feed</h2>
+        <h2>Timeline<span class="keys">
+          <span><i style="background:#3d444d"></i>transport</span>
+          <span><i style="background:#2dd4bf"></i>classify</span>
+          <span><i style="background:#a78bfa"></i>locate</span>
+          <span><i style="background:#3fb950"></i>click</span>
+        </span></h2>
         <div class="body" id="feed"><div class="empty">Perceive and click events scroll here once a job is running.</div></div>
       </section>
     </aside>
@@ -586,33 +620,43 @@ function resetFeed(){
   $("feed").innerHTML = '<div class="empty">Perceive and click events scroll here once a job is running.</div>';
 }
 
-/* Two timings on one line are unreadable unless each says what it is, and
-   both together are too wide. So each gets a one-letter tag — L for how long
-   it took to locate the control, T for the whole round trip — and the full
-   words live in the tooltip and on the two charts. */
-function msTag(tag, ms, okMax, warnMax, title){
-  if (ms == null) return "";
-  const value = Math.round(ms);
-  return `<span class="ms ${msGrade(value,okMax,warnMax)}" title="${title}">`+
-    `<span class="tag">${tag}</span>${value}</span>`;
+/* One step, drawn as the phases it is made of.
+
+   A poll is: the IPC round trip to the worker, the worker deciding which
+   screen this is, the worker locating the control, and — when it acts — the
+   click. Those add up to the number on the right, so the bar answers "where
+   did the time go" at a glance and the tooltip gives the milliseconds. */
+function phaseBar(e){
+  const total = e.perceive_ms;
+  if (total == null) return `<span class="bar"></span><span class="tot"></span>`;
+  const classify = e.classify_ms ?? 0;
+  const locate = e.resolve_ms ?? 0;
+  const act = e.act_ms ?? 0;
+  const transport = Math.max(0, total - classify - locate);
+  const end = total + act;
+  const seg = (ms, cls) => ms > 0 ? `<i class="${cls}" style="flex:${ms}"></i>` : "";
+  const round = (ms) => Math.round(ms);
+  const title = `transport ${round(transport)} · classify ${round(classify)}`+
+    ` · locate ${round(locate)}${act ? ` · click ${round(act)}` : ""} ms`;
+  return `<span class="bar" title="${title}">`+
+    `${seg(transport,"tp")}${seg(classify,"cl")}${seg(locate,"lo")}${seg(act,"ac")}`+
+    `</span><span class="tot ${msGrade(round(end),300,800)}">${round(end)}</span>`;
 }
 
 function evRow(e){
-  const t = `<span class="t">${fmtClock(e.t)}</span>`;
+  const t = `<span class="dot"></span><span class="t">${fmtClock(e.t)}</span>`;
   const div = document.createElement("div");
   const kind = e.event;
-  const locate = msTag("L", e.resolve_ms, 150, 400, "locate the control, ms");
   if (kind === "perceive"){
     div.className = "ev perceive";
     div.innerHTML = `${t}<span class="grow">${esc(e.screen || "unknown")}</span>`+
-      `${locate}${msTag("T", e.perceive_ms, 300, 600, "total round trip, ms")}`;
+      phaseBar(e);
   } else if (kind === "click"){
     div.className = "ev click";
     const sc = e.score;
     const pill = sc!=null ? `<span class="pill ${sc>=0.9?"ok":sc>=0.8?"warn":"bad"}">${sc.toFixed(2)}</span>` : "";
-    const xy = Array.isArray(e.center) ? `<span class="xy">${e.center[0]},${e.center[1]}</span>` : "";
-    div.innerHTML = `${t}<span class="grow"><span class="el">${esc(e.element||"?")}</span> ${xy}</span>`+
-      `${locate}${pill}`;
+    div.innerHTML = `${t}<span class="grow"><span class="el">${esc(e.element||"?")}</span></span>`+
+      `${pill}${phaseBar(e)}`;
   } else if (kind === "doing"){
     // What the job says it is on right now.
     const extra = e.wait_s!=null ? ` ${e.wait_s}s` : (e.until_s!=null ? ` ${e.until_s}s left` : "");

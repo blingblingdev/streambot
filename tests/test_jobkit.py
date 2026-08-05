@@ -41,6 +41,7 @@ class FakeClient:
         self.clicks: list[tuple[int, int]] = []
         self.analyses = 0
         self.registered = False
+        self.last_act_ms: float | None = None
 
     def register(self, declaration, assets_dir=None) -> dict:
         self.registered = True
@@ -53,6 +54,7 @@ class FakeClient:
 
     def click(self, x: int, y: int) -> bool:
         self.clicks.append((x, y))
+        self.last_act_ms = 120.0
         return True
 
     def report_scene(self, layout, controls) -> None:
@@ -130,13 +132,19 @@ class LoopTests(LoopFixture, unittest.TestCase):
         self.assertIn("click", kinds)
         self.assertIn("cycle", kinds)
 
-    def test_a_click_event_carries_the_analysis_cost(self) -> None:
-        loop = self.build([analysis("settlement", ("replay", 790, 632))])
+    def test_a_click_event_carries_the_whole_path_that_led_to_it(self) -> None:
+        # The panel draws one step as the phases it is made of, so a click has
+        # to carry the look that found it as well as the click itself.
+        loop = self.build(
+            [dict(analysis("settlement", ("replay", 790, 632)), perceive_ms=71.0)]
+        )
         self.drive(loop, lambda ctx: ctx.click("replay"), sleeps=1)
         click = [e for e in self.events(loop) if e["event"] == "click"][0]
-        self.assertEqual(click["resolve_ms"], 2.0)
-        self.assertEqual(click["classify_ms"], 4.0)
         self.assertEqual(click["element"], "replay")
+        self.assertEqual(click["perceive_ms"], 71.0)
+        self.assertEqual(click["classify_ms"], 4.0)
+        self.assertEqual(click["resolve_ms"], 2.0)
+        self.assertEqual(click["act_ms"], 120.0)
 
     def test_looking_is_reported_even_when_nothing_is_clicked(self) -> None:
         # Most of a run clicks nothing; the panel must still show that the job
