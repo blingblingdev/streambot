@@ -244,23 +244,33 @@
   .job .js { display: flex; align-items: center; gap: 6px; font-size: 12px;
     color: var(--muted); font-family: var(--mono); }
 
-  /* ---------- job settings ---------- */
-  .jobwrap { border-top: 1px solid var(--line); }
-  .jobwrap:first-child { border-top: none; }
-  .jobwrap .job { border-top: none; }
-  .cfg { display: none; padding: 4px 2px 14px; }
-  .cfg.open { display: block; }
-  .cfg .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-  .cfg .fld { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
-  .cfg .fld label { flex: 1; font-size: 12.5px; color: var(--muted); }
-  .cfg .fld input, .cfg .fld select { width: 120px; background: var(--panel-2);
+  /* ---------- job settings dialog ---------- */
+  .modal { position: fixed; inset: 0; z-index: 60; display: none;
+    align-items: center; justify-content: center; padding: 20px; }
+  .modal.open { display: flex; }
+  /* Its own backdrop rather than the drawer's .scrim, which starts below the
+     header and sits above this sheet's stacking order. */
+  .modal .backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.5); }
+  .modal .sheet { position: relative; z-index: 1; width: min(420px, 100%);
+    max-height: 80vh; overflow-y: auto; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 18px 48px rgba(0,0,0,.5); }
+  .modal .mhead { display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .modal .mtitle { flex: 1; font-weight: 500; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .modal .mbody { padding: 12px 16px 16px; }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .fld { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+  .fld label { flex: 1; font-size: 12.5px; color: var(--muted); }
+  .fld input, .fld select { width: 130px; background: var(--panel-2);
     color: var(--text); border: 1px solid var(--line); border-radius: 6px;
-    padding: 5px 8px; font-family: var(--mono); font-size: 12.5px; }
-  .cfg .fld input[type=checkbox] { width: auto; }
-  .cfg .fld .unit { width: 18px; font-size: 11px; color: var(--faint);
+    padding: 6px 8px; font-family: var(--mono); font-size: 12.5px; }
+  .fld input[type=checkbox] { width: auto; }
+  .fld .unit { width: 18px; font-size: 11px; color: var(--faint);
     font-family: var(--mono); }
-  .cfg .hint { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
-  .cfg .dirty input, .cfg .dirty select { border-color: var(--blue); }
+  .modal .hint { font-size: 11.5px; color: var(--faint); margin-top: 10px;
+    line-height: 1.5; }
 
   /* ---------- logs view ---------- */
   .logsview { flex: 1; min-height: 0; display: none; padding: 16px; }
@@ -309,6 +319,7 @@
         <div class="body">
           <div class="namerow">
             <div class="name" id="rjobName">None</div>
+            <button class="ghost sm" id="rjobSettings" style="display:none">Settings</button>
             <button class="danger sm" id="rjobStop" style="display:none">Stop job</button>
           </div>
           <div class="state" id="rjobState"><span class="led"></span>Idle</div>
@@ -390,6 +401,17 @@
     <div class="dbody" id="jobs"><div class="empty">No jobs found.</div></div>
   </aside>
 
+  <div class="modal" id="cfgModal">
+    <div class="backdrop" id="cfgScrim"></div>
+    <div class="sheet">
+      <div class="mhead">
+        <div class="mtitle" id="cfgTitle">Settings</div>
+        <button class="ghost sm" id="cfgClose">Close</button>
+      </div>
+      <div class="mbody" id="cfgBody"></div>
+    </div>
+  </div>
+
   <div id="toast"></div>
 
 <script src="vendor/echarts.min.js"></script>
@@ -460,7 +482,9 @@ function render(payload){
     if (running){
       rsec.classList.remove("idle");
       runningJobName = running.name;
+      runningJob = running;
       stopBtn.style.display = "";
+      $("rjobSettings").style.display = running.configurable ? "" : "none";
       $("rjobName").textContent = running.title || running.name;
       $("rjobState").innerHTML = '<span class="led ok"></span>Running · pid '+running.pid;
       const m = running.metrics || {};
@@ -490,7 +514,9 @@ function render(payload){
     } else {
       rsec.classList.add("idle");
       runningJobName = null;
+      runningJob = null;
       stopBtn.style.display = "none";
+      $("rjobSettings").style.display = "none";
       $("rjobName").textContent = "None";
       $("rjobState").innerHTML = '<span class="led"></span>Idle — start one from the Jobs panel';
       ["mUptime","mCycles","mTotal","mPerceive","mResolve","mAct","mScore","mClicks","mErr"]
@@ -532,6 +558,7 @@ function render(payload){
 
 /* ---------- scrolling perceive/click event feed ---------- */
 let runningJobName = null;
+let runningJob = null;
 let feedJob = null;      // job the feed currently shows
 let feedLastI = 0;       // last appended flow-log line index (server-side)
 const FEED_MAX_ROWS = 250;
@@ -765,11 +792,11 @@ function renderMarkers(controls, recId){
   }
 }
 
-/* Settings panels are built once and patched in place. The jobs list re-renders
-   every second from the SSE tick, and a form rebuilt under the operator loses
-   focus and whatever they were halfway through typing. */
-const cfgOpen = new Set();     // jobs whose panel is expanded
-const cfgPanels = new Map();   // job name -> {panel, inputs, apply}
+/* Settings open in a dialog rather than inside the jobs list. The list
+   re-renders every second from the SSE tick, so a form living in it would lose
+   focus and half-typed input; a dialog sits outside that entirely. */
+let cfgJob = null;             // {name, title} while the dialog is open
+let cfgInputs = new Map();     // key -> {field, input}
 
 function cfgValue(field, input){
   if (field.type === "boolean") return input.checked;
@@ -780,7 +807,6 @@ function cfgValue(field, input){
 
 function buildConfig(job, payload){
   const panel = document.createElement("div");
-  panel.className = "cfg";
   const inputs = new Map();
 
   if (payload.schema.presets.length){
@@ -834,13 +860,15 @@ function buildConfig(job, payload){
 
   const hint = document.createElement("div");
   hint.className = "hint";
-  hint.textContent = "Applies to a running job at its next poll — no restart.";
+  hint.textContent =
+    "A running job picks these up at its next look — nothing restarts. "+
+    "Cycles and Runtime stop it when reached; 0 means no limit.";
   panel.appendChild(hint);
   return {panel, inputs};
 }
 
-function fillConfig(entry, values){
-  for (const [key, {field, input}] of entry.inputs){
+function fillConfig(values){
+  for (const [key, {field, input}] of cfgInputs){
     if (document.activeElement === input) continue;  // they are editing it
     const value = values[key];
     if (field.type === "boolean") input.checked = !!value;
@@ -848,15 +876,25 @@ function fillConfig(entry, values){
   }
 }
 
-async function openConfig(job){
-  const existing = cfgPanels.get(job.name);
-  const payload = await (await fetch(`/api/jobs/config?name=${encodeURIComponent(job.name)}`)).json();
-  if (!payload.ok){ toast(`Settings unavailable: ${payload.error||"error"}`); return null; }
-  if (existing){ fillConfig(existing, payload.values); return existing; }
+async function openSettings(job){
+  const payload = await (await fetch(
+    `/api/jobs/config?name=${encodeURIComponent(job.name)}`)).json();
+  if (!payload.ok){ toast(`Settings unavailable: ${payload.error||"error"}`); return; }
   const built = buildConfig(job, payload);
-  fillConfig(built, payload.values);
-  cfgPanels.set(job.name, built);
-  return built;
+  cfgJob = job;
+  cfgInputs = built.inputs;
+  $("cfgTitle").textContent = job.title || job.name;
+  const body = $("cfgBody");
+  body.innerHTML = "";
+  body.appendChild(built.panel);
+  fillConfig(payload.values);
+  $("cfgModal").classList.add("open");
+}
+
+function closeSettings(){
+  $("cfgModal").classList.remove("open");
+  cfgJob = null;
+  cfgInputs = new Map();
 }
 
 async function applyConfig(name, values, label){
@@ -865,8 +903,7 @@ async function applyConfig(name, values, label){
     toast(`Rejected: ${response.detail || response.error || "error"}`);
   } else {
     toast(label ? `Applied ${label}` : "Setting saved");
-    const entry = cfgPanels.get(name);
-    if (entry) fillConfig(entry, response.values);
+    if (cfgJob && cfgJob.name === name) fillConfig(response.values);
   }
 }
 
@@ -875,7 +912,6 @@ function renderJobs(jobs){
   if (!jobs.length){ box.innerHTML='<div class="empty">No jobs found.</div>'; return; }
   box.innerHTML="";
   for (const job of jobs){
-    const wrap=document.createElement("div"); wrap.className="jobwrap";
     const row=document.createElement("div"); row.className="job";
     row.innerHTML =
       `<div class="info"><div class="jt">${esc(job.title||job.name)}</div>`+
@@ -886,11 +922,7 @@ function renderJobs(jobs){
       const gear=document.createElement("button");
       gear.className="sm ghost";
       gear.textContent="Settings";
-      gear.onclick=async()=>{
-        if (cfgOpen.has(job.name)){ cfgOpen.delete(job.name); }
-        else { cfgOpen.add(job.name); await openConfig(job); }
-        renderJobs(jobs);
-      };
+      gear.onclick=()=>openSettings(job);
       row.appendChild(gear);
     }
     const btn=document.createElement("button");
@@ -899,12 +931,7 @@ function renderJobs(jobs){
     btn.onclick=async()=>{ const r=await post(job.running?"/api/jobs/stop":"/api/jobs/start",{name:job.name});
       toast(r.ok?(job.running?`Stopped ${job.name}`:`Started ${job.name}`):`Action failed: ${r.error||"error"}`); };
     row.appendChild(btn);
-    wrap.appendChild(row);
-    if (job.configurable && cfgOpen.has(job.name)){
-      const entry = cfgPanels.get(job.name);
-      if (entry){ entry.panel.classList.add("open"); wrap.appendChild(entry.panel); }
-    }
-    box.appendChild(wrap);
+    box.appendChild(row);
   }
 }
 
@@ -946,6 +973,13 @@ $("btnDetach").onclick=async()=>{ const r=await post("/api/worker/disconnect");
     ?"Stop the running job first":`Disconnect failed: ${r.error||"error"}`); };
 $("btnAttach").onclick=async()=>{ const r=await post("/api/worker/connect");
   toast(r.ok?"Stream connecting":`Connect failed: ${r.error||"error"}`); };
+$("rjobSettings").onclick=()=>{ if (runningJob) openSettings(runningJob); };
+$("cfgClose").onclick=closeSettings;
+$("cfgScrim").onclick=closeSettings;
+document.addEventListener("keydown",(e)=>{
+  if (e.key==="Escape" && $("cfgModal").classList.contains("open")) closeSettings();
+});
+
 $("rjobStop").onclick=async()=>{
   if (!runningJobName) return;
   const btn=$("rjobStop"); btn.disabled=true;

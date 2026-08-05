@@ -138,6 +138,17 @@ class LoopTests(LoopFixture, unittest.TestCase):
         self.assertEqual(click["classify_ms"], 4.0)
         self.assertEqual(click["element"], "replay")
 
+    def test_looking_is_reported_even_when_nothing_is_clicked(self) -> None:
+        # Most of a run clicks nothing; the panel must still show that the job
+        # is looking, and how long looking takes.
+        loop = self.build([dict(analysis(None), perceive_ms=61.0)])
+        self.drive(loop, lambda ctx: None, sleeps=1)
+        looks = [e for e in self.events(loop) if e["event"] == "perceive"]
+        self.assertEqual(len(looks), 1)
+        self.assertEqual(looks[0]["perceive_ms"], 61.0)
+        self.assertEqual(looks[0]["resolve_ms"], 2.0)
+        self.assertEqual(looks[0]["classify_ms"], 4.0)
+
     def test_registration_happens_once_before_any_analysis(self) -> None:
         loop = self.build([analysis(None)])
         loop.declaration = self.root / "elements.json"

@@ -63,6 +63,26 @@ MAX_ELEMENTS = 256
 MAX_SCREENS = 64
 MAX_ANCHORS_PER_SCREEN = 8
 
+# Provenance keys the resolver ignores but a declaration may carry.
+#
+# What a template is, where it was recorded, what it was measured against and
+# why a threshold is what it is: that belongs beside the data, not in a second
+# file that drifts from it. They are named explicitly rather than allowing a
+# free-form bag, so a typo in a real key ("treshold") is still an error.
+DOC_KEYS_TOP = {"target", "notes", "resolution_policy", "frame_size"}
+DOC_KEYS_ELEMENT = {
+    "id",
+    "notes",
+    "screen_note",
+    "template_note",
+    "ocr_confirm",
+    "calibration_reference",
+    "isolation",
+    "recorded_on",
+    "source_frame",
+}
+DOC_KEYS_SCREEN = {"note", "screen_note", "notes"}
+
 DEFAULT_THRESHOLD = 0.85
 DEFAULT_CLASSIFY_THRESHOLD = 0.85
 DEFAULT_CLASSIFY_LEAD = 0.10
@@ -206,7 +226,8 @@ class ElementSpec:
         _strict_keys(
             mapping,
             required={"template", "screen", "y_band"},
-            optional={"threshold", "expected", "clickable", "glyph", "min_rb"},
+            optional={"threshold", "expected", "clickable", "glyph", "min_rb"}
+            | DOC_KEYS_ELEMENT,
             path=path,
         )
         min_rb = mapping.get("min_rb")
@@ -371,7 +392,7 @@ def load_declaration(
     _strict_keys(
         data,
         required={"elements", "screens"},
-        optional={"schema_version", "match", "regions", "frame_size", "notes"},
+        optional={"schema_version", "match", "regions"} | DOC_KEYS_TOP,
         path="declaration",
     )
     settings = MatchSettings.from_mapping(data.get("match", {}), "declaration.match")
@@ -395,7 +416,9 @@ def load_declaration(
     for screen, value in screen_data.items():
         screen_path = f"declaration.screens.{screen}"
         mapping = _mapping(value, screen_path)
-        _strict_keys(mapping, required={"anchors"}, optional={"note"}, path=screen_path)
+        _strict_keys(
+            mapping, required={"anchors"}, optional=DOC_KEYS_SCREEN, path=screen_path
+        )
         anchors = mapping["anchors"]
         if not isinstance(anchors, Sequence) or isinstance(anchors, str) or not anchors:
             raise ConfigurationError(f"{screen_path}.anchors must be a non-empty list")
@@ -406,7 +429,23 @@ def load_declaration(
             for index, anchor in enumerate(anchors)
         )
 
-    element_data = _mapping(data["elements"], "declaration.elements")
+    raw_elements = data["elements"]
+    if isinstance(raw_elements, Sequence) and not isinstance(raw_elements, str):
+        # A recorded target lists its elements in the order they were found,
+        # each carrying its own id. Accept that shape as well as a mapping.
+        element_data = {}
+        for index, entry in enumerate(raw_elements):
+            entry_map = _mapping(entry, f"declaration.elements[{index}]")
+            element_id = entry_map.get("id")
+            if not isinstance(element_id, str) or not element_id:
+                raise ConfigurationError(
+                    f"declaration.elements[{index}].id must be a non-empty string"
+                )
+            if element_id in element_data:
+                raise ConfigurationError(f"duplicate element: {element_id}")
+            element_data[element_id] = entry_map
+    else:
+        element_data = _mapping(raw_elements, "declaration.elements")
     if not element_data:
         raise ConfigurationError("declaration.elements must declare an element")
     if len(element_data) > MAX_ELEMENTS:

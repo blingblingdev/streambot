@@ -125,12 +125,20 @@ class JobClient:
         return self._call("register-elements", arguments)
 
     def analyze(self, elements: Iterable[str] | None = None) -> dict:
-        """Ask the worker what is on screen and where."""
+        """Ask the worker what is on screen and where.
+
+        The response carries the worker's own breakdown (classify_ms,
+        resolve_ms); `perceive_ms` is added here because only this side can
+        see the round trip, and the round trip is what the operator waits for.
+        """
 
         arguments: dict[str, Any] = {}
         if elements is not None:
             arguments["elements"] = list(elements)
-        return self._call("analyze", arguments)
+        started = time.perf_counter()
+        response = self._call("analyze", arguments)
+        response["perceive_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        return response
 
     def click(self, x: int, y: int) -> bool:
         return bool(self._call("click", {"x": int(x), "y": int(y)}).get("ok"))
@@ -260,9 +268,32 @@ class JobLoop:
         self.clicks = 0
         self._stop = False
         self._registered = False
+        self._last_look_at = 0.0
 
     def request_stop(self, *_args) -> None:
         self._stop = True
+
+    def _record_look(self, analysis: dict) -> None:
+        """Report what looking cost, whether or not it led to a click.
+
+        Most of a run is spent looking and doing nothing — waiting out a level,
+        a load, an idle period. If only clicks were reported the panel would
+        show nothing at all for minutes at a time, which is exactly when an
+        operator most wants to know the job is still alive and still fast.
+        Throttled, because the record is for humans, not for every poll.
+        """
+
+        now = time.time()
+        if now - self._last_look_at < 2.0:
+            return
+        self._last_look_at = now
+        self.events.emit(
+            "perceive",
+            perceive_ms=analysis.get("perceive_ms"),
+            classify_ms=analysis.get("classify_ms"),
+            resolve_ms=analysis.get("resolve_ms"),
+            screen=analysis.get("screen"),
+        )
 
     def _ensure_registered(self) -> bool:
         if self._registered or self.declaration is None:
@@ -307,6 +338,7 @@ class JobLoop:
                 if not analysis.get("ok"):
                     self.events.problem("analyze-failed", error=analysis.get("error"))
                 else:
+                    self._record_look(analysis)
                     context = PollContext(self, analysis)
                     policy(context)
                     if context.sleep_seconds is not None:
