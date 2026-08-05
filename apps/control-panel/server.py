@@ -227,6 +227,7 @@ class FlowLogReader:
         self._ring: deque[dict[str, Any]] = deque(maxlen=self.RING_SIZE)
         self._session: dict[str, Any] | None = None
         self._perceive: deque[tuple[int, float]] = deque(maxlen=self.HISTORY_MAX_POINTS)
+        self._resolve: deque[tuple[int, float]] = deque(maxlen=self.HISTORY_MAX_POINTS)
         self._score: deque[tuple[int, float]] = deque(maxlen=self.HISTORY_MAX_POINTS)
         self._click_ts: deque[int] = deque(maxlen=3 * self.HISTORY_MAX_POINTS)
 
@@ -237,6 +238,7 @@ class FlowLogReader:
         self._ring.clear()
         self._session = None
         self._perceive.clear()
+        self._resolve.clear()
         self._score.clear()
         self._click_ts.clear()
 
@@ -282,6 +284,9 @@ class FlowLogReader:
             perceive = event.get("perceive_ms")
             if kind in ("perceive", "click") and isinstance(perceive, (int, float)):
                 self._perceive.append((int(t), float(perceive)))
+            resolve = event.get("resolve_ms")
+            if kind in ("perceive", "click") and isinstance(resolve, (int, float)):
+                self._resolve.append((int(t), float(resolve)))
             if kind == "click":
                 self._click_ts.append(int(t))
                 score = event.get("score")
@@ -296,6 +301,7 @@ class FlowLogReader:
                 "score_n": 0,
             }
             self._perceive.clear()
+            self._resolve.clear()
             self._score.clear()
             self._click_ts.clear()
             return
@@ -394,6 +400,7 @@ class FlowLogReader:
             cpm = [[m * 60 + 30, counts.get(m, 0)] for m in range(first, last + 1)]
         return {
             "perceive": [[t, v] for t, v in self._perceive],
+            "resolve": [[t, v] for t, v in self._resolve],
             "score": [[t, v] for t, v in self._score],
             "cpm": cpm,
         }

@@ -130,8 +130,11 @@
   .ev .t { flex: none; color: var(--faint); font-size: 10.5px; }
   .ev .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
+  .ev .ms { flex: none; font-variant-numeric: tabular-nums; }
   .ev .ms.ok { color: var(--ok); } .ev .ms.warn { color: var(--warn); }
   .ev .ms.bad { color: var(--bad); }
+  /* L = locate, T = total. One letter keeps two timings legible on one line. */
+  .ev .ms .tag { color: var(--faint); font-size: 9.5px; margin-right: 3px; }
   .ev.click { background: rgba(63,185,80,.08); border-left-color: var(--ok);
     color: var(--text); padding: 5px 8px; }
   .ev.click .el { font-weight: 600; }
@@ -379,6 +382,10 @@
           <div class="gbody"><div class="chart" id="chPerceive"></div></div>
         </div>
         <div class="gcard">
+          <div class="ghead">Locate control <span class="cur" id="curResolve">—</span></div>
+          <div class="gbody"><div class="chart" id="chResolve"></div></div>
+        </div>
+        <div class="gcard">
           <div class="ghead">Click confidence <span class="cur" id="curScore">—</span></div>
           <div class="gbody"><div class="chart" id="chScore"></div></div>
         </div>
@@ -579,42 +586,43 @@ function resetFeed(){
   $("feed").innerHTML = '<div class="empty">Perceive and click events scroll here once a job is running.</div>';
 }
 
-/* How long it took to work out WHERE to click. Shown on every row that has
-   it, because during a long wait these rows are the only sign of life. */
-function locateMs(e){
-  if (e.resolve_ms == null) return "";
-  const ms = Math.round(e.resolve_ms);
-  return `<span class="ms ${msGrade(ms,150,400)}">locate ${ms} ms</span>`;
+/* Two timings on one line are unreadable unless each says what it is, and
+   both together are too wide. So each gets a one-letter tag — L for how long
+   it took to locate the control, T for the whole round trip — and the full
+   words live in the tooltip and on the two charts. */
+function msTag(tag, ms, okMax, warnMax, title){
+  if (ms == null) return "";
+  const value = Math.round(ms);
+  return `<span class="ms ${msGrade(value,okMax,warnMax)}" title="${title}">`+
+    `<span class="tag">${tag}</span>${value}</span>`;
 }
 
 function evRow(e){
   const t = `<span class="t">${fmtClock(e.t)}</span>`;
   const div = document.createElement("div");
   const kind = e.event;
+  const locate = msTag("L", e.resolve_ms, 150, 400, "locate the control, ms");
   if (kind === "perceive"){
-    const ms = Math.round(e.perceive_ms ?? 0);
-    const where = e.screen ? esc(e.screen) : "unrecognised screen";
     div.className = "ev perceive";
-    div.innerHTML = `${t}<span class="grow">look · ${where}</span>${locateMs(e)}`+
-      `<span class="ms ${msGrade(ms,300,600)}">${ms} ms</span>`;
+    div.innerHTML = `${t}<span class="grow">${esc(e.screen || "unknown")}</span>`+
+      `${locate}${msTag("T", e.perceive_ms, 300, 600, "total round trip, ms")}`;
   } else if (kind === "click"){
     div.className = "ev click";
     const sc = e.score;
     const pill = sc!=null ? `<span class="pill ${sc>=0.9?"ok":sc>=0.8?"warn":"bad"}">${sc.toFixed(2)}</span>` : "";
-    const xy = Array.isArray(e.center) ? `<span class="xy">(${e.center[0]},${e.center[1]})</span>` : "";
-    const win = e.window ? `<span class="xy">${esc(e.window)}</span>` : "";
-    div.innerHTML = `${t}<span class="grow">click <span class="el">${esc(e.element||"?")}</span> ${xy} ${win}</span>`+
-      `${locateMs(e)}${pill}`;
+    const xy = Array.isArray(e.center) ? `<span class="xy">${e.center[0]},${e.center[1]}</span>` : "";
+    div.innerHTML = `${t}<span class="grow"><span class="el">${esc(e.element||"?")}</span> ${xy}</span>`+
+      `${locate}${pill}`;
   } else if (kind === "doing"){
     // What the job says it is on right now.
-    const extra = e.wait_s!=null ? ` · ${e.wait_s}s` : (e.until_s!=null ? ` · ${e.until_s}s left` : "");
+    const extra = e.wait_s!=null ? ` ${e.wait_s}s` : (e.until_s!=null ? ` ${e.until_s}s left` : "");
     div.className = "ev";
     div.innerHTML = `${t}<span class="grow">${esc(e.what||"working")}${extra}</span>`;
   } else if (kind === "config-changed"){
     const pairs = Object.entries(e.changed || {})
-      .map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(", ");
+      .map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(" ");
     div.className = "ev mile";
-    div.innerHTML = `${t}<span class="grow">⚙ setting changed · ${pairs}</span>`;
+    div.innerHTML = `${t}<span class="grow">⚙ ${pairs}</span>`;
   } else if (kind === "cycle"){
     div.className = "ev cycle";
     div.innerHTML = `${t}<span class="grow">✓ cycle ${e.completed ?? "?"} complete</span>`;
@@ -702,10 +710,12 @@ function initCharts(){
   if (charts || typeof echarts === "undefined") return;
   charts = {
     perceive: echarts.init($("chPerceive")),
+    resolve: echarts.init($("chResolve")),
     score: echarts.init($("chScore")),
     cpm: echarts.init($("chCpm")),
   };
   charts.perceive.setOption(chartOption("#2dd4bf", v => Math.round(v) + " ms"));
+  charts.resolve.setOption(chartOption("#a78bfa", v => Math.round(v) + " ms"));
   charts.score.setOption(chartOption("#e3b341", v => Number(v).toFixed(2)));
   charts.cpm.setOption(chartOption("#4c9aff", v => v + " /min"));
 }
@@ -726,6 +736,7 @@ async function refreshHistory(jobName){
     initCharts();
     if (!charts) return;
     setSeries(charts.perceive, h.perceive || []);
+    setSeries(charts.resolve, h.resolve || []);
     setSeries(charts.score, h.score || []);
     setSeries(charts.cpm, h.cpm || []);
   } catch (e) { /* transient fetch failure: next tick retries */ }
@@ -737,6 +748,9 @@ function headlineCharts(m){
   const p = m.perceive_ms;
   set("curPerceive", p != null ? Math.round(p) + " ms" : "—",
       p == null ? "" : p <= 300 ? "ok" : p <= 600 ? "warn" : "bad");
+  const r = m.resolve_ms;
+  set("curResolve", r != null ? Math.round(r) + " ms" : "—",
+      r == null ? "" : r <= 150 ? "ok" : r <= 400 ? "warn" : "bad");
   const s = m.last_score != null ? m.last_score : m.mean_score;
   set("curScore", s != null ? s.toFixed(2) : "—",
       s == null ? "" : s >= 0.9 ? "ok" : s >= 0.8 ? "warn" : "bad");
