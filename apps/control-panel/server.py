@@ -908,7 +908,11 @@ class ConsoleState:
         self.events = SystemEvents()
         self._bonjour: bool | None = None
         self._bonjour_checked_at = 0.0
+        self._bonjour_probing = False
         self._bonjour_lock = threading.Lock()
+        self._snapshot: dict[str, Any] | None = None
+        self._snapshot_at = 0.0
+        self._snapshot_lock = threading.Lock()
 
     def start_watching(self) -> None:
         """Track turning points once a second, browser open or not.
@@ -920,20 +924,60 @@ class ConsoleState:
         def watch() -> None:
             while True:
                 try:
-                    self.events.observe(self.status(), self.jobs.status())
+                    status = self.status()
+                    jobs = self.jobs.status()
+                    with self._snapshot_lock:
+                        self._snapshot = {"status": status, "jobs": jobs}
+                        self._snapshot_at = time.monotonic()
+                    self.events.observe(status, jobs)
                 except Exception:
                     pass  # observation must never take the console down
                 time.sleep(1.0)
 
         threading.Thread(target=watch, name="system-events", daemon=True).start()
 
+    def snapshot(self, max_age: float = 3.0) -> dict[str, Any] | None:
+        """The watcher's latest status+jobs, if fresh enough to serve.
+
+        This is what makes a page load instant: the first SSE frame is the
+        snapshot the watcher took within the last second, already computed —
+        no IPC round trip, no disk, nothing for the new connection to wait on.
+        """
+
+        with self._snapshot_lock:
+            if self._snapshot is None:
+                return None
+            if time.monotonic() - self._snapshot_at > max_age:
+                return None  # the watcher is wedged; compute inline instead
+            return self._snapshot
+
     def bonjour(self) -> bool | None:
+        """The last known answer, refreshed in the background.
+
+        The probe is a three-second `dns-sd` run. It used to happen inline,
+        under the lock, on whichever status() call found the cache stale — so
+        one page load in a few would sit behind it, which is exactly the
+        "sometimes the console takes seconds to appear" complaint. Status now
+        always answers with what it has; a stale cache only *starts* a
+        refresh, single-flight, off this thread.
+        """
+
         with self._bonjour_lock:
             now = time.monotonic()
-            if now - self._bonjour_checked_at > 15.0:
-                self._bonjour = host_visible_via_bonjour()
-                self._bonjour_checked_at = now
+            stale = now - self._bonjour_checked_at > 15.0
+            if stale and not self._bonjour_probing:
+                self._bonjour_probing = True
+                threading.Thread(
+                    target=self._probe_bonjour, name="bonjour-probe", daemon=True
+                ).start()
             return self._bonjour
+
+    def _probe_bonjour(self) -> None:
+        result = host_visible_via_bonjour()
+        with self._bonjour_lock:
+            self._bonjour = result
+            self._bonjour_checked_at = time.monotonic()
+            self._bonjour_probing = False
 
     def status(self) -> dict[str, Any]:
         supervisor = self.supervisor
@@ -1202,11 +1246,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         try:
+            first = True
             while True:
-                payload = {
-                    "status": self.console.status(),
-                    "jobs": self.console.jobs.status(),
-                }
+                # The first frame is the watcher's ready-made snapshot, so a
+                # page load paints without waiting on IPC or disk; after that,
+                # each tick computes fresh state as before.
+                payload = self.console.snapshot() if first else None
+                if payload is None:
+                    payload = {
+                        "status": self.console.status(),
+                        "jobs": self.console.jobs.status(),
+                    }
+                first = False
                 message = "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
                 self.wfile.write(message.encode("utf-8"))
                 self.wfile.flush()

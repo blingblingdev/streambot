@@ -46,6 +46,24 @@ function useToast() {
   return [message, setMessage] as const;
 }
 
+function Loading({ stalled }: { stalled: boolean }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-4 bg-bg text-text">
+      <div className="flex items-center gap-2 text-[13px] font-semibold tracking-[.14em]">
+        <span className="size-[7px] animate-pulse rounded-full bg-blue" />
+        STREAMBOT
+        <span className="text-[11px] font-normal tracking-normal text-faint">console</span>
+      </div>
+      <div className="size-6 animate-spin rounded-full border-2 border-line border-t-blue" />
+      <div className="text-[12px] text-faint">
+        {stalled
+          ? "Still waiting for the console… is server.py running?"
+          : "Connecting…"}
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const shot = isShotMode();
   const { payload: streamed } = useEventStream(!shot);
@@ -82,6 +100,15 @@ export function App() {
     if (shot) fetchOnce().then(setOnce);
   }, [shot]);
 
+  // Loading is a real state, not a page of dashes: nothing renders until the
+  // first snapshot arrives, and if that takes implausibly long the message
+  // says what to check rather than spinning forever in silence.
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setStalled(true), 5000);
+    return () => clearTimeout(timer);
+  }, []);
+
   const payload = streamed ?? once;
   const status = payload?.status ?? null;
   const jobs = useMemo(() => payload?.jobs ?? [], [payload]);
@@ -117,6 +144,8 @@ export function App() {
     const result = await call();
     setToast(result.ok ? good : `${bad}: ${result.error ?? "error"}`);
   };
+
+  if (!payload) return <Loading stalled={stalled} />;
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
