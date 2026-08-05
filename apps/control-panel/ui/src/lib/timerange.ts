@@ -10,9 +10,11 @@ export interface RangePreset {
 
 export const RANGE_PRESETS: RangePreset[] = [
   { label: "15m", seconds: 15 * 60 },
+  { label: "30m", seconds: 30 * 60 },
   { label: "1h", seconds: 3600 },
   { label: "6h", seconds: 6 * 3600 },
   { label: "24h", seconds: 24 * 3600 },
+  { label: "3d", seconds: 3 * 24 * 3600 },
   { label: "7d", seconds: 7 * 24 * 3600 },
   { label: "30d", seconds: 30 * 24 * 3600 },
 ];
