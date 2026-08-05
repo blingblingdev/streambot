@@ -30,6 +30,33 @@ Each job is a directory with a `job.json`:
   (the parent of the jobs directory), so `jobs/example/runner.py` works both
   here and in an external jobs repository.
 
+## Settings an operator can change while it runs
+
+A job declares its tunables; the console renders them and writes the values;
+`streambot.job_config` re-reads them in the running job. Nothing is pushed and
+nothing restarts — the job adopts a change at its next poll, so a setting can
+never land halfway through an action.
+
+```json
+"config": {
+  "fields": [
+    {"key": "idle_seconds", "label": "Idle", "type": "integer",
+     "min": 30, "max": 3600, "default": 210, "unit": "s"}
+  ],
+  "presets": [{"label": "Short", "values": {"idle_seconds": 210}}]
+}
+```
+
+Types are `integer`, `number`, `boolean`, `enum` (with `choices`) and `text`;
+numeric fields must declare `min` and `max`, because bounds are what let the
+console refuse nonsense before it reaches a running job. Every job also gets
+`max_cycles`, `max_seconds` (**0 means unlimited**) and `poll_seconds` without
+declaring them, and may redeclare any of the three to tighten its bounds.
+
+Declarations are versioned with the job. Values are not: they are this
+machine's preferences, and live in `$STREAMBOT_HOME/.state/job-config/<job>.json`,
+written atomically so a job mid-poll never reads half a file.
+
 ## External jobs repository
 
 Jobs do not have to live in this checkout. Point the console at any

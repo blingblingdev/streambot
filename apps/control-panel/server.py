@@ -38,7 +38,14 @@ if sys.prefix == sys.base_prefix:
 
 sys.path.insert(0, str(PROJECT_ROOT / "apps" / "core-worker"))
 
+from streambot.config import ConfigurationError  # noqa: E402
 from streambot.control_plane import send_control_command  # noqa: E402
+from streambot.job_config import (  # noqa: E402
+    ConfigSchema,
+    read_values,
+    values_path,
+    write_values,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LOG_DIR = PROJECT_ROOT / ".state" / "control-panel"
@@ -327,6 +334,14 @@ class FlowLogReader:
             if isinstance(e.get("perceive_ms"), (int, float))
         ]
         act = [e["act_ms"] for e in clicks if isinstance(e.get("act_ms"), (int, float))]
+        # How long it took to work out WHERE to click, as opposed to how long
+        # looking took (perceive) or clicking took (act). Without it the panel
+        # showed the two ends of a step and nothing of the middle.
+        resolve = [
+            e["resolve_ms"]
+            for e in recent
+            if isinstance(e.get("resolve_ms"), (int, float))
+        ]
         all_clicks = [e for e in ring if e.get("event") == "click"]
         last = all_clicks[-1] if all_clicks else None
         session = self._session or {}
@@ -350,6 +365,7 @@ class FlowLogReader:
             "last_action": (last.get("element") if last else None),
             "last_action_age_s": (now - last["t"]) if last and "t" in last else None,
             "perceive_ms": round(sum(perceive) / len(perceive)) if perceive else None,
+            "resolve_ms": round(sum(resolve) / len(resolve)) if resolve else None,
             "act_ms": round(sum(act) / len(act)) if act else None,
             "errors_recent": len(errors),
         }
@@ -472,8 +488,70 @@ class JobSupervisor:
                 "title": str(spec.get("title", name)),
                 "description": str(spec.get("description", "")),
                 "runner": [str(part) for part in runner],
+                # Settings the job says an operator may change. Carried raw:
+                # the schema is validated where it is used, so one job's
+                # malformed block cannot hide every other job from the list.
+                "config": spec.get("config"),
             }
         return jobs
+
+    @staticmethod
+    def config_schema(name: str) -> "ConfigSchema | None":
+        spec = JobSupervisor.registry().get(name)
+        if spec is None:
+            return None
+        try:
+            return ConfigSchema.from_manifest(spec.get("config"))
+        except ConfigurationError:
+            return None
+
+    def config(self, name: str) -> dict[str, Any]:
+        """The declared settings, their stored values, and where they live."""
+
+        schema = self.config_schema(name)
+        if schema is None:
+            if name not in self.registry():
+                return {"ok": False, "error": "UnknownJob"}
+            return {"ok": False, "error": "InvalidConfigSchema"}
+        stored = read_values(values_path(name)) or {}
+        return {
+            "ok": True,
+            "name": name,
+            "schema": schema.as_dict(),
+            "values": schema.resolve(stored),
+            "stored": stored,
+        }
+
+    def set_config(self, name: str, values: dict[str, Any]) -> dict[str, Any]:
+        """Store settings for a job, running or not.
+
+        A running job adopts them at its next poll; nothing is pushed and
+        nothing is restarted, so a change can never land in the middle of an
+        action the job is already taking.
+        """
+
+        schema = self.config_schema(name)
+        if schema is None:
+            if name not in self.registry():
+                return {"ok": False, "error": "UnknownJob"}
+            return {"ok": False, "error": "InvalidConfigSchema"}
+        try:
+            validated = schema.validate(values)
+        except ConfigurationError as error:
+            return {"ok": False, "error": "InvalidValue", "detail": str(error)}
+        path = values_path(name)
+        stored = read_values(path) or {}
+        stored.update(validated)
+        try:
+            write_values(path, stored)
+        except OSError as error:
+            return {"ok": False, "error": type(error).__name__}
+        return {
+            "ok": True,
+            "name": name,
+            "values": schema.resolve(stored),
+            "stored": stored,
+        }
 
     def start(self, name: str) -> dict[str, Any]:
         spec = self.registry().get(name)
@@ -580,6 +658,11 @@ class JobSupervisor:
                     reader.poll()
                     metrics = reader.metrics()
                     events = reader.recent_events()
+                configurable = False
+                try:
+                    configurable = ConfigSchema.from_manifest(spec.get("config")) is not None
+                except ConfigurationError:
+                    configurable = False
                 rows.append(
                     {
                         "name": name,
@@ -590,6 +673,10 @@ class JobSupervisor:
                         "last_log": last_log,
                         "metrics": metrics,
                         "events": events,
+                        # The panel asks for the schema and values only when a
+                        # config panel is opened: they change when an operator
+                        # edits them, not once a second like everything else.
+                        "configurable": configurable,
                     }
                 )
         return rows
@@ -814,6 +901,12 @@ class Handler(BaseHTTPRequestHandler):
             name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
             self._send_json(self.console.jobs.history(name))
             return
+        if route == "/api/jobs/config":
+            from urllib.parse import parse_qs, urlparse
+
+            name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+            self._send_json(self.console.jobs.config(name))
+            return
         if route == "/vendor/echarts.min.js":
             self._send_file(
                 STATIC_DIR / "vendor" / "echarts.min.js",
@@ -849,6 +942,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/jobs/stop":
             name = str(self._read_json().get("name", ""))
             self._send_json(self.console.jobs.stop(name))
+            return
+        if self.path == "/api/jobs/config":
+            body = self._read_json()
+            name = str(body.get("name", ""))
+            values = body.get("values")
+            if not isinstance(values, dict):
+                self._send_json({"ok": False, "error": "MissingValues"}, code=400)
+                return
+            self._send_json(self.console.jobs.set_config(name, values))
             return
         if self.path == "/api/automation":
             enabled = bool(self._read_json().get("enabled"))

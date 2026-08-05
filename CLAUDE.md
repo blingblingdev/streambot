@@ -90,6 +90,14 @@ platform, importable from the project venv via a `.pth` entry created by
 - `operations.py` — the append-only, metadata-only record of every operation
   the worker performs, attributed to the job that asked. Written by the
   platform so the audit trail does not depend on each job cooperating.
+- `job_config.py` — settings a job declares in `job.json` and an operator
+  edits from the console while the job runs. Values are re-read by mtime at a
+  poll boundary, so a change never lands mid-action; `max_cycles`/`max_seconds`
+  (0 = unlimited) and `poll_seconds` come free with every job.
+- `jobkit.py` — the runtime every job runner used to hand-roll: venv
+  bootstrap, the client that routes observe/analyze/act through the worker,
+  the crash-proof poll loop, signals, and the event record. A job supplies a
+  declaration, a policy and a config schema; nothing else.
 - `control_plane.py` — a local Unix-socket IPC surface (snapshot, click, status,
   dispatch, `report-scene`, `register-elements`, `analyze`) so a job or the
   console can drive the worker. Actions are serialized onto one executor

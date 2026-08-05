@@ -244,6 +244,24 @@
   .job .js { display: flex; align-items: center; gap: 6px; font-size: 12px;
     color: var(--muted); font-family: var(--mono); }
 
+  /* ---------- job settings ---------- */
+  .jobwrap { border-top: 1px solid var(--line); }
+  .jobwrap:first-child { border-top: none; }
+  .jobwrap .job { border-top: none; }
+  .cfg { display: none; padding: 4px 2px 14px; }
+  .cfg.open { display: block; }
+  .cfg .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .cfg .fld { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
+  .cfg .fld label { flex: 1; font-size: 12.5px; color: var(--muted); }
+  .cfg .fld input, .cfg .fld select { width: 120px; background: var(--panel-2);
+    color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 8px; font-family: var(--mono); font-size: 12.5px; }
+  .cfg .fld input[type=checkbox] { width: auto; }
+  .cfg .fld .unit { width: 18px; font-size: 11px; color: var(--faint);
+    font-family: var(--mono); }
+  .cfg .hint { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
+  .cfg .dirty input, .cfg .dirty select { border-color: var(--blue); }
+
   /* ---------- logs view ---------- */
   .logsview { flex: 1; min-height: 0; display: none; padding: 16px; }
   .logsview.show { display: flex; }
@@ -302,6 +320,7 @@
             <div class="cell"><div class="k">Confidence</div><div class="v mono" id="mScore">—</div></div>
             <div class="cell"><div class="k">Errors (60s)</div><div class="v mono" id="mErr">—</div></div>
             <div class="cell"><div class="k">Capture → Detect</div><div class="v mono" id="mPerceive">—</div></div>
+            <div class="cell"><div class="k">Locate control</div><div class="v mono" id="mResolve">—</div></div>
             <div class="cell"><div class="k">Detect → Click</div><div class="v mono" id="mAct">—</div></div>
           </div>
         </div>
@@ -460,6 +479,7 @@ function render(payload){
         el.className = "v mono " + (ms==null?"":ms<=okMax?"ok":ms<=warnMax?"warn":"bad");
       };
       setMs("mPerceive", m.perceive_ms, 300, 600);
+      setMs("mResolve", m.resolve_ms, 150, 400);
       setMs("mAct", m.act_ms, 400, 800);
       const er = m.errors_recent;
       const erEl = $("mErr");
@@ -473,7 +493,7 @@ function render(payload){
       stopBtn.style.display = "none";
       $("rjobName").textContent = "None";
       $("rjobState").innerHTML = '<span class="led"></span>Idle — start one from the Jobs panel';
-      ["mUptime","mCycles","mTotal","mPerceive","mAct","mScore","mClicks","mErr"]
+      ["mUptime","mCycles","mTotal","mPerceive","mResolve","mAct","mScore","mClicks","mErr"]
         .forEach(id=>{ $(id).textContent="—"; $(id).className="v mono"; });
       resetFeed();
       resetCharts();
@@ -745,23 +765,146 @@ function renderMarkers(controls, recId){
   }
 }
 
+/* Settings panels are built once and patched in place. The jobs list re-renders
+   every second from the SSE tick, and a form rebuilt under the operator loses
+   focus and whatever they were halfway through typing. */
+const cfgOpen = new Set();     // jobs whose panel is expanded
+const cfgPanels = new Map();   // job name -> {panel, inputs, apply}
+
+function cfgValue(field, input){
+  if (field.type === "boolean") return input.checked;
+  if (field.type === "integer") return parseInt(input.value, 10);
+  if (field.type === "number") return parseFloat(input.value);
+  return input.value;
+}
+
+function buildConfig(job, payload){
+  const panel = document.createElement("div");
+  panel.className = "cfg";
+  const inputs = new Map();
+
+  if (payload.schema.presets.length){
+    const presets = document.createElement("div");
+    presets.className = "presets";
+    for (const preset of payload.schema.presets){
+      const button = document.createElement("button");
+      button.className = "sm ghost";
+      button.textContent = preset.label;
+      button.onclick = () => applyConfig(job.name, preset.values, preset.label);
+      presets.appendChild(button);
+    }
+    panel.appendChild(presets);
+  }
+
+  for (const field of payload.schema.fields){
+    const row = document.createElement("div");
+    row.className = "fld";
+    const label = document.createElement("label");
+    label.textContent = field.label || field.key;
+    if (field.help) label.title = field.help;
+    row.appendChild(label);
+
+    let input;
+    if (field.type === "enum"){
+      input = document.createElement("select");
+      for (const choice of field.choices || []){
+        const option = document.createElement("option");
+        option.value = choice; option.textContent = choice;
+        input.appendChild(option);
+      }
+    } else {
+      input = document.createElement("input");
+      if (field.type === "boolean") input.type = "checkbox";
+      else if (field.type === "text") input.type = "text";
+      else {
+        input.type = "number";
+        if (field.min !== undefined) input.min = field.min;
+        if (field.max !== undefined) input.max = field.max;
+        if (field.type === "number") input.step = "0.1";
+      }
+    }
+    input.onchange = () => applyConfig(job.name, {[field.key]: cfgValue(field, input)});
+    row.appendChild(input);
+    const unit = document.createElement("span");
+    unit.className = "unit"; unit.textContent = field.unit || "";
+    row.appendChild(unit);
+    inputs.set(field.key, {field, input, row});
+    panel.appendChild(row);
+  }
+
+  const hint = document.createElement("div");
+  hint.className = "hint";
+  hint.textContent = "Applies to a running job at its next poll — no restart.";
+  panel.appendChild(hint);
+  return {panel, inputs};
+}
+
+function fillConfig(entry, values){
+  for (const [key, {field, input}] of entry.inputs){
+    if (document.activeElement === input) continue;  // they are editing it
+    const value = values[key];
+    if (field.type === "boolean") input.checked = !!value;
+    else input.value = value;
+  }
+}
+
+async function openConfig(job){
+  const existing = cfgPanels.get(job.name);
+  const payload = await (await fetch(`/api/jobs/config?name=${encodeURIComponent(job.name)}`)).json();
+  if (!payload.ok){ toast(`Settings unavailable: ${payload.error||"error"}`); return null; }
+  if (existing){ fillConfig(existing, payload.values); return existing; }
+  const built = buildConfig(job, payload);
+  fillConfig(built, payload.values);
+  cfgPanels.set(job.name, built);
+  return built;
+}
+
+async function applyConfig(name, values, label){
+  const response = await post("/api/jobs/config", {name, values});
+  if (!response.ok){
+    toast(`Rejected: ${response.detail || response.error || "error"}`);
+  } else {
+    toast(label ? `Applied ${label}` : "Setting saved");
+    const entry = cfgPanels.get(name);
+    if (entry) fillConfig(entry, response.values);
+  }
+}
+
 function renderJobs(jobs){
   const box = $("jobs");
   if (!jobs.length){ box.innerHTML='<div class="empty">No jobs found.</div>'; return; }
   box.innerHTML="";
   for (const job of jobs){
+    const wrap=document.createElement("div"); wrap.className="jobwrap";
     const row=document.createElement("div"); row.className="job";
     row.innerHTML =
       `<div class="info"><div class="jt">${esc(job.title||job.name)}</div>`+
       `<div class="jd">${esc(job.description||"")}</div></div>`+
       `<div class="js"><span class="led ${job.running?"ok":""}"></span>`+
       `${job.running?"Running":"Stopped"}</div>`;
+    if (job.configurable){
+      const gear=document.createElement("button");
+      gear.className="sm ghost";
+      gear.textContent="Settings";
+      gear.onclick=async()=>{
+        if (cfgOpen.has(job.name)){ cfgOpen.delete(job.name); }
+        else { cfgOpen.add(job.name); await openConfig(job); }
+        renderJobs(jobs);
+      };
+      row.appendChild(gear);
+    }
     const btn=document.createElement("button");
     btn.className="sm "+(job.running?"danger":"primary");
     btn.textContent=job.running?"Stop":"Start";
     btn.onclick=async()=>{ const r=await post(job.running?"/api/jobs/stop":"/api/jobs/start",{name:job.name});
       toast(r.ok?(job.running?`Stopped ${job.name}`:`Started ${job.name}`):`Action failed: ${r.error||"error"}`); };
-    row.appendChild(btn); box.appendChild(row);
+    row.appendChild(btn);
+    wrap.appendChild(row);
+    if (job.configurable && cfgOpen.has(job.name)){
+      const entry = cfgPanels.get(job.name);
+      if (entry){ entry.panel.classList.add("open"); wrap.appendChild(entry.panel); }
+    }
+    box.appendChild(wrap);
   }
 }
 
