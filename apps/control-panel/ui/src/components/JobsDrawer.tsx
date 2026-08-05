@@ -28,16 +28,18 @@ export function JobsDrawer({
 
   return (
     <>
+      {/* Full height: the header can wrap to two rows on a narrow screen, so
+          nothing may assume how tall it is. */}
       <div
         onClick={onClose}
         className={
-          `fixed inset-x-0 top-[54px] bottom-0 z-25 bg-black/40 transition-opacity ` +
+          `fixed inset-0 z-25 bg-black/40 transition-opacity ` +
           (open ? "opacity-100" : "pointer-events-none opacity-0")
         }
       />
       <aside
         className={
-          `fixed top-[54px] right-0 bottom-0 z-30 flex w-[min(460px,92vw)] flex-col ` +
+          `fixed inset-y-0 right-0 z-30 flex w-[min(460px,92vw)] flex-col ` +
           `border-l border-line bg-panel transition-transform duration-200 ` +
           (open ? "translate-x-0" : "translate-x-full")
         }

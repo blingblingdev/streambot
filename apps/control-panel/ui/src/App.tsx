@@ -120,73 +120,77 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      {/* Scrolls sideways rather than wrapping on a narrow screen, so every
-          control stays reachable and the height the drawer anchors to holds. */}
-      <header className="scroll-thin flex h-[54px] shrink-0 items-center gap-3 overflow-x-auto border-b border-line bg-panel px-4 whitespace-nowrap">
-        <div className="flex shrink-0 items-center gap-2 text-[13px] font-semibold tracking-[.14em]">
-          <Led grade={connection?.state === "observing" ? "ok" : worker?.pid != null ? "warn" : ""} />
-          STREAMBOT
-          <span className="text-[11px] font-normal tracking-normal text-faint">console</span>
+      {/* Two groups — identity on the left, controls on the right. On a
+          narrow screen the controls wrap onto their own row whole, which is
+          why the drawer no longer assumes the header is 54px tall. */}
+      <header className="flex min-h-[54px] shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-line bg-panel px-4 py-2 whitespace-nowrap">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2 text-[13px] font-semibold tracking-[.14em]">
+            <Led grade={connection?.state === "observing" ? "ok" : worker?.pid != null ? "warn" : ""} />
+            STREAMBOT
+            <span className="text-[11px] font-normal tracking-normal text-faint">console</span>
+          </div>
+          <div className="flex min-w-0 items-center gap-2 rounded-md border border-line bg-panel2 px-2.5 py-1 text-[11.5px]">
+            <span className="text-faint">worker</span>
+            <span className="truncate font-mono">
+              {worker?.pid != null
+                ? `${connection?.state ?? "connected"} · pid ${worker.pid}`
+                : worker?.socket_present
+                  ? "connected (external)"
+                  : "stopped"}
+            </span>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2 rounded-md border border-line bg-panel2 px-2.5 py-1 text-[11.5px]">
-          <span className="text-faint">worker</span>
-          <span className="font-mono">
-            {worker?.pid != null
-              ? `${connection?.state ?? "connected"} · pid ${worker.pid}`
-              : worker?.socket_present
-                ? "connected (external)"
-                : "stopped"}
-          </span>
-        </div>
-        <div className="flex-1" />
-        <div className="flex overflow-hidden rounded-md border border-line text-[12px]">
-          {(["dash", "logs"] as const).map((view) => (
-            <button
-              key={view}
-              onClick={() => setTab(view)}
-              className={
-                `cursor-pointer px-3 py-1.5 ` +
-                (tab === view ? "bg-blue/20 text-blue" : "text-muted hover:text-text")
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex overflow-hidden rounded-md border border-line text-[12px]">
+            {(["dash", "logs"] as const).map((view) => (
+              <button
+                key={view}
+                onClick={() => setTab(view)}
+                className={
+                  `cursor-pointer px-3 py-1.5 ` +
+                  (tab === view ? "bg-blue/20 text-blue" : "text-muted hover:text-text")
+                }
+              >
+                {view === "dash" ? "Dashboard" : "Logs"}
+              </button>
+            ))}
+          </div>
+          <Button small onClick={() => setDrawer((open) => !open)}>
+            Jobs{" "}
+            <span className="font-mono">
+              {jobs.length ? `${jobs.filter((job) => job.running).length}/${jobs.length}` : "0"}
+            </span>
+          </Button>
+          {worker?.socket_present && streaming ? (
+            <Button
+              onClick={() =>
+                act(api.disconnectWorker, "Stream disconnecting", "Disconnect failed")
               }
             >
-              {view === "dash" ? "Dashboard" : "Logs"}
-            </button>
-          ))}
-        </div>
-        <Button small onClick={() => setDrawer((open) => !open)}>
-          Jobs{" "}
-          <span className="font-mono">
-            {jobs.length ? `${jobs.filter((job) => job.running).length}/${jobs.length}` : "0"}
-          </span>
-        </Button>
-        {worker?.socket_present && streaming ? (
+              Disconnect stream
+            </Button>
+          ) : null}
+          {worker?.socket_present && detached ? (
+            <Button onClick={() => act(api.connectWorker, "Stream connecting", "Connect failed")}>
+              Connect stream
+            </Button>
+          ) : null}
           <Button
-            onClick={() =>
-              act(api.disconnectWorker, "Stream disconnecting", "Disconnect failed")
-            }
+            kind="primary"
+            disabled={worker?.pid != null || worker?.socket_present}
+            onClick={() => act(api.startWorker, "Worker starting", "Start failed")}
           >
-            Disconnect stream
+            Start worker
           </Button>
-        ) : null}
-        {worker?.socket_present && detached ? (
-          <Button onClick={() => act(api.connectWorker, "Stream connecting", "Connect failed")}>
-            Connect stream
+          <Button
+            kind="danger"
+            disabled={worker?.pid == null}
+            onClick={() => act(api.stopWorker, "Worker stopped", "Stop failed")}
+          >
+            Stop worker
           </Button>
-        ) : null}
-        <Button
-          kind="primary"
-          disabled={worker?.pid != null || worker?.socket_present}
-          onClick={() => act(api.startWorker, "Worker starting", "Start failed")}
-        >
-          Start worker
-        </Button>
-        <Button
-          kind="danger"
-          disabled={worker?.pid == null}
-          onClick={() => act(api.stopWorker, "Worker stopped", "Stop failed")}
-        >
-          Stop worker
-        </Button>
+        </div>
       </header>
 
       {banner ? (
