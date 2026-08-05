@@ -164,6 +164,24 @@
     font-size: 9.5px; color: var(--faint); font-weight: 400; letter-spacing: 0; }
   .keys span { display: inline-flex; align-items: center; gap: 3px; }
   .keys i { width: 7px; height: 7px; border-radius: 2px; display: block; }
+
+  /* Click a timed row to open its breakdown. The bar shows the shape; this
+     shows the milliseconds, and which control the step was about. */
+  .ev.tap { cursor: pointer; }
+  .ev.tap:hover { background: rgba(255,255,255,.04); }
+  .ev.open .bar { outline: 1px solid var(--faint); outline-offset: 1px; }
+  .evdetail { margin: 2px 0 8px 30px; padding: 8px 10px; border-radius: 6px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .evdetail .dl { display: flex; align-items: center; gap: 7px; padding: 1.5px 0; }
+  .evdetail .dl i { flex: none; width: 7px; height: 7px; border-radius: 2px; }
+  .evdetail .dn { flex: 1; }
+  .evdetail .dv { font-variant-numeric: tabular-nums; color: var(--text); }
+  .evdetail .sum { border-top: 1px solid var(--line); margin-top: 5px;
+    padding-top: 5px; }
+  .evdetail .sum .dn, .evdetail .sum .dv { color: var(--text); font-weight: 500; }
+  .evdetail .ctx { margin-top: 6px; color: var(--faint); font-size: 10.5px;
+    line-height: 1.5; word-break: break-all; }
   .ev.click { background: rgba(63,185,80,.08); border-left-color: var(--ok);
     color: var(--text); padding: 5px 8px; }
   .ev.click .el { font-weight: 600; }
@@ -643,6 +661,45 @@ function phaseBar(e){
     `</span><span class="tot ${msGrade(round(end),300,800)}">${round(end)}</span>`;
 }
 
+/* The same phases as the bar, with their milliseconds and what the step was
+   about. Opened by clicking the row: the feed stays scannable, and the detail
+   is one tap away when a number looks wrong. */
+function phaseDetail(e){
+  const total = e.perceive_ms ?? 0;
+  const classify = e.classify_ms ?? 0;
+  const locate = e.resolve_ms ?? 0;
+  const act = e.act_ms ?? 0;
+  const transport = Math.max(0, total - classify - locate);
+  const row = (cls, label, ms, extra) => `<div class="dl ${extra||""}">`+
+    `<i style="background:${cls}"></i><span class="dn">${label}</span>`+
+    `<span class="dv">${ms.toFixed(1)} ms</span></div>`;
+  let html = row("#3d444d", "transport", transport)
+           + row("#2dd4bf", "classify", classify)
+           + row("#a78bfa", "locate", locate);
+  if (act > 0) html += row("#3fb950", "click", act);
+  html += `<div class="dl sum"><i style="background:transparent"></i>`+
+    `<span class="dn">end to end</span>`+
+    `<span class="dv">${(total + act).toFixed(1)} ms</span></div>`;
+  const bits = [];
+  if (e.screen) bits.push(esc(e.screen));
+  if (e.element) bits.push(esc(e.element));
+  if (Array.isArray(e.center)) bits.push(`${e.center[0]},${e.center[1]}`);
+  if (e.score != null) bits.push(`score ${e.score}`);
+  if (bits.length) html += `<div class="ctx">${bits.join(" · ")}</div>`;
+  return html;
+}
+
+function toggleDetail(wrap, e){
+  const row = wrap.firstChild;
+  const open = wrap.querySelector(".evdetail");
+  if (open){ open.remove(); row.classList.remove("open"); return; }
+  const detail = document.createElement("div");
+  detail.className = "evdetail";
+  detail.innerHTML = phaseDetail(e);
+  wrap.appendChild(detail);
+  row.classList.add("open");
+}
+
 function evRow(e){
   const t = `<span class="dot"></span><span class="t">${fmtClock(e.t)}</span>`;
   const div = document.createElement("div");
@@ -687,7 +744,16 @@ function evRow(e){
     div.className = "ev";
     div.innerHTML = `${t}<span class="grow">${esc(kind||"event")}</span>`;
   }
-  return div;
+  // The row and its breakdown travel together, so trimming the feed can never
+  // leave an orphaned detail behind.
+  const wrap = document.createElement("div");
+  wrap.className = "evwrap";
+  wrap.appendChild(div);
+  if (e.perceive_ms != null){
+    div.classList.add("tap");
+    div.onclick = () => toggleDetail(wrap, e);
+  }
+  return wrap;
 }
 
 function renderFeed(jobName, events){
