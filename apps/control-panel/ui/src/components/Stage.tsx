@@ -19,6 +19,7 @@ import {
   type Grade,
 } from "../lib/format";
 import { PHASE_COLORS } from "../lib/timeline";
+import { NARROW_QUERY, useMediaQuery } from "../lib/useMediaQuery";
 import { Chart } from "./Charts";
 import { Led } from "./ui";
 
@@ -189,16 +190,25 @@ export function Stage({
   }, [jobName]);
 
   const empty = useMemo(() => [], []);
+  const narrow = useMediaQuery(NARROW_QUERY);
   const cards = 5;
-  const columns = cards <= 2 ? cards : Math.ceil(Math.sqrt(cards));
+  const columns = narrow ? 1 : cards <= 2 ? cards : Math.ceil(Math.sqrt(cards));
   const connection = status?.connection;
   const fresh = freshness(connection?.frame_age_ms);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div
-        className="grid min-h-0 flex-1 gap-2.5 p-2.5"
-        style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+        className={
+          `grid min-h-0 flex-1 gap-2.5 p-2.5 ` +
+          (narrow ? "scroll-thin overflow-y-auto" : "")
+        }
+        style={{
+          gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+          // Stacked, the cards cannot share the height; give each its own
+          // and let the column scroll.
+          ...(narrow ? { gridAutoRows: "260px" } : {}),
+        }}
       >
         <Card
           title="Live frame"
@@ -241,7 +251,7 @@ export function Stage({
             // The stream's vitals belong on the stream's own picture: what
             // state it is in, how fresh this frame is, how many times it has
             // had to reconnect, and what it can see.
-            <div className="flex items-center gap-4 border-t border-line px-3 py-1.5 font-mono text-[11px] text-muted">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 border-t border-line px-3 py-1.5 font-mono text-[11px] text-muted">
               <span className="flex items-center gap-1.5">
                 <Led
                   grade={

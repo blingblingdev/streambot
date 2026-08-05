@@ -10,6 +10,7 @@ import {
   loadRailWidth,
   storeRailWidth,
 } from "./lib/rail";
+import { NARROW_QUERY, useMediaQuery } from "./lib/useMediaQuery";
 import { Button, Cell, Led, Section } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { Stage } from "./components/Stage";
@@ -56,6 +57,7 @@ export function App() {
   const [events, setEvents] = useState<FlowEvent[]>([]);
   const [feedJob, setFeedJob] = useState<string | null>(null);
   const [railWidth, setRailWidth] = useState(loadRailWidth);
+  const narrow = useMediaQuery(NARROW_QUERY);
 
   const dragRail = (down: React.PointerEvent) => {
     down.preventDefault();
@@ -118,13 +120,15 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col bg-bg text-text">
-      <header className="flex h-[54px] shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
-        <div className="flex items-center gap-2 text-[13px] font-semibold tracking-[.14em]">
+      {/* Scrolls sideways rather than wrapping on a narrow screen, so every
+          control stays reachable and the height the drawer anchors to holds. */}
+      <header className="scroll-thin flex h-[54px] shrink-0 items-center gap-3 overflow-x-auto border-b border-line bg-panel px-4 whitespace-nowrap">
+        <div className="flex shrink-0 items-center gap-2 text-[13px] font-semibold tracking-[.14em]">
           <Led grade={connection?.state === "observing" ? "ok" : worker?.pid != null ? "warn" : ""} />
           STREAMBOT
           <span className="text-[11px] font-normal tracking-normal text-faint">console</span>
         </div>
-        <div className="flex items-center gap-2 rounded-md border border-line bg-panel2 px-2.5 py-1 text-[11.5px]">
+        <div className="flex shrink-0 items-center gap-2 rounded-md border border-line bg-panel2 px-2.5 py-1 text-[11.5px]">
           <span className="text-faint">worker</span>
           <span className="font-mono">
             {worker?.pid != null
@@ -194,10 +198,13 @@ export function App() {
       {tab === "logs" ? (
         <LogsView workerTail={status?.log_tail ?? []} />
       ) : (
-        <div className="flex min-h-0 flex-1">
+        <div className={`flex min-h-0 flex-1 ${narrow ? "flex-col" : ""}`}>
           <aside
-            className="flex shrink-0 flex-col overflow-hidden bg-panel"
-            style={{ width: railWidth }}
+            className={
+              `flex shrink-0 flex-col overflow-hidden bg-panel ` +
+              (narrow ? "max-h-[42vh] w-full border-b border-line" : "")
+            }
+            style={narrow ? undefined : { width: railWidth }}
           >
             <Section
               title="Running"
@@ -300,15 +307,17 @@ export function App() {
             </section>
           </aside>
 
-          <div
-            onPointerDown={dragRail}
-            onDoubleClick={() => {
-              setRailWidth(RAIL_DEFAULT);
-              storeRailWidth(RAIL_DEFAULT);
-            }}
-            title="Drag to resize · double-click to reset"
-            className="w-[5px] shrink-0 cursor-col-resize border-x border-transparent bg-line/60 transition-colors hover:bg-blue/60 active:bg-blue"
-          />
+          {narrow ? null : (
+            <div
+              onPointerDown={dragRail}
+              onDoubleClick={() => {
+                setRailWidth(RAIL_DEFAULT);
+                storeRailWidth(RAIL_DEFAULT);
+              }}
+              title="Drag to resize · double-click to reset"
+              className="w-[5px] shrink-0 cursor-col-resize border-x border-transparent bg-line/60 transition-colors hover:bg-blue/60 active:bg-blue"
+            />
+          )}
 
           <Stage status={status} jobName={running?.name ?? null} metrics={metrics} />
         </div>

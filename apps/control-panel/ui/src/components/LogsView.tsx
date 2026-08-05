@@ -38,7 +38,7 @@ export function LogsView({ workerTail }: { workerTail: string[] }) {
   }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 gap-4 p-4">
+    <div className="flex min-h-0 flex-1 gap-4 p-4 max-[820px]:flex-col">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-line bg-panel">
         <div className="border-b border-line px-4 py-2.5 text-[11px] tracking-wide text-faint uppercase">
           System events
