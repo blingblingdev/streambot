@@ -165,23 +165,27 @@
   .keys span { display: inline-flex; align-items: center; gap: 3px; }
   .keys i { width: 7px; height: 7px; border-radius: 2px; display: block; }
 
-  /* Click a timed row to open its breakdown. The bar shows the shape; this
-     shows the milliseconds, and which control the step was about. */
+  /* Click a timed row to open its breakdown. It floats beside the feed rather
+     than expanding inside it: the rail is narrow, and a row that grows pushes
+     everything below it while you are reading. */
   .ev.tap { cursor: pointer; }
   .ev.tap:hover { background: rgba(255,255,255,.04); }
+  .ev.open { background: rgba(255,255,255,.07); }
   .ev.open .bar { outline: 1px solid var(--faint); outline-offset: 1px; }
-  .evdetail { margin: 2px 0 8px 30px; padding: 8px 10px; border-radius: 6px;
-    background: var(--panel-2); border: 1px solid var(--line);
+  .pop { position: fixed; z-index: 55; display: none; min-width: 200px;
+    max-width: 280px; padding: 9px 11px; border-radius: 8px;
+    background: var(--panel); border: 1px solid var(--line);
+    box-shadow: 0 12px 32px rgba(0,0,0,.5);
     font-family: var(--mono); font-size: 11px; color: var(--muted); }
-  .evdetail .dl { display: flex; align-items: center; gap: 7px; padding: 1.5px 0; }
-  .evdetail .dl i { flex: none; width: 7px; height: 7px; border-radius: 2px; }
-  .evdetail .dn { flex: 1; }
-  .evdetail .dv { font-variant-numeric: tabular-nums; color: var(--text); }
-  .evdetail .sum { border-top: 1px solid var(--line); margin-top: 5px;
-    padding-top: 5px; }
-  .evdetail .sum .dn, .evdetail .sum .dv { color: var(--text); font-weight: 500; }
-  .evdetail .ctx { margin-top: 6px; color: var(--faint); font-size: 10.5px;
-    line-height: 1.5; word-break: break-all; }
+  .pop.open { display: block; }
+  .pop .dl { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+  .pop .dl i { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+  .pop .dn { flex: 1; }
+  .pop .dv { font-variant-numeric: tabular-nums; color: var(--text); }
+  .pop .sum { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+  .pop .sum .dn, .pop .sum .dv { color: var(--text); font-weight: 500; }
+  .pop .ctx { margin-top: 7px; color: var(--faint); font-size: 10.5px;
+    line-height: 1.55; word-break: break-word; }
   .ev.click { background: rgba(63,185,80,.08); border-left-color: var(--ok);
     color: var(--text); padding: 5px 8px; }
   .ev.click .el { font-weight: 600; }
@@ -471,6 +475,8 @@
     </div>
   </div>
 
+  <div class="pop" id="evPop"></div>
+
   <div id="toast"></div>
 
 <script src="vendor/echarts.min.js"></script>
@@ -635,6 +641,7 @@ function msGrade(ms, okMax, warnMax){ return ms<=okMax?"ok":ms<=warnMax?"warn":"
 
 function resetFeed(){
   feedJob = null; feedLastI = 0;
+  hideDetail();  // its row is about to stop existing
   $("feed").innerHTML = '<div class="empty">Perceive and click events scroll here once a job is running.</div>';
 }
 
@@ -689,15 +696,33 @@ function phaseDetail(e){
   return html;
 }
 
-function toggleDetail(wrap, e){
-  const row = wrap.firstChild;
-  const open = wrap.querySelector(".evdetail");
-  if (open){ open.remove(); row.classList.remove("open"); return; }
-  const detail = document.createElement("div");
-  detail.className = "evdetail";
-  detail.innerHTML = phaseDetail(e);
-  wrap.appendChild(detail);
+let popRow = null;   // the row whose breakdown is showing, if any
+
+function hideDetail(){
+  $("evPop").classList.remove("open");
+  if (popRow) popRow.classList.remove("open");
+  popRow = null;
+}
+
+function showDetail(row, e, mouse){
+  if (popRow === row){ hideDetail(); return; }   // same row again: close it
+  hideDetail();
+  const pop = $("evPop");
+  pop.innerHTML = phaseDetail(e);
+  pop.classList.add("open");
+  // Placed where you clicked rather than pinned to the row, because the feed
+  // scrolls itself as new events arrive and a pinned panel would drift away
+  // from the line it belongs to. Flipped and clamped to stay on screen.
+  const width = pop.offsetWidth, height = pop.offsetHeight;
+  let x = mouse.clientX + 14, y = mouse.clientY - 10;
+  if (x + width > window.innerWidth - 8) x = mouse.clientX - width - 14;
+  if (x < 8) x = 8;
+  if (y + height > window.innerHeight - 8) y = window.innerHeight - height - 8;
+  if (y < 8) y = 8;
+  pop.style.left = x + "px";
+  pop.style.top = y + "px";
   row.classList.add("open");
+  popRow = row;
 }
 
 function evRow(e){
@@ -744,16 +769,11 @@ function evRow(e){
     div.className = "ev";
     div.innerHTML = `${t}<span class="grow">${esc(kind||"event")}</span>`;
   }
-  // The row and its breakdown travel together, so trimming the feed can never
-  // leave an orphaned detail behind.
-  const wrap = document.createElement("div");
-  wrap.className = "evwrap";
-  wrap.appendChild(div);
   if (e.perceive_ms != null){
     div.classList.add("tap");
-    div.onclick = () => toggleDetail(wrap, e);
+    div.onclick = (mouse) => { mouse.stopPropagation(); showDetail(div, e, mouse); };
   }
-  return wrap;
+  return div;
 }
 
 function renderFeed(jobName, events){
@@ -771,7 +791,11 @@ function renderFeed(jobName, events){
     box.appendChild(evRow(e));
     feedLastI = Math.max(feedLastI, e.i ?? feedLastI);
   }
-  while (box.children.length > FEED_MAX_ROWS) box.removeChild(box.firstChild);
+  while (box.children.length > FEED_MAX_ROWS){
+    const dropped = box.firstChild;
+    if (dropped === popRow) hideDetail();  // its line has scrolled out of history
+    box.removeChild(dropped);
+  }
   if (nearBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -1125,8 +1149,14 @@ $("rjobSettings").onclick=()=>{ if (runningJob) openSettings(runningJob); };
 $("cfgClose").onclick=closeSettings;
 $("cfgScrim").onclick=closeSettings;
 document.addEventListener("keydown",(e)=>{
-  if (e.key==="Escape" && $("cfgModal").classList.contains("open")) closeSettings();
+  if (e.key!=="Escape") return;
+  if ($("cfgModal").classList.contains("open")) closeSettings();
+  else hideDetail();
 });
+// Anywhere outside dismisses the breakdown; clicks inside it are for reading
+// and copying, so they must not.
+document.addEventListener("click",()=>hideDetail());
+$("evPop").onclick=(e)=>e.stopPropagation();
 
 $("rjobStop").onclick=async()=>{
   if (!runningJobName) return;

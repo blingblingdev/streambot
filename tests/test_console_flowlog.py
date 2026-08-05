@@ -132,12 +132,19 @@ class FeedDomBoundTest(unittest.TestCase):
         self.assertLessEqual(int(match.group(1)), 500)
 
     def test_feed_trims_oldest_rows_past_the_cap(self) -> None:
+        # Pins the behaviour — bounded by the cap, dropped from the front —
+        # rather than the exact wording, so the guard survives the feed being
+        # reshaped but not the trim being removed.
         html = self.HTML.read_text(encoding="utf-8")
-        self.assertIn(
-            "while (box.children.length > FEED_MAX_ROWS) "
-            "box.removeChild(box.firstChild);",
+        match = re.search(
+            r"while \(box\.children\.length > FEED_MAX_ROWS\)\s*\{?(.{0,400}?)\}",
             html,
+            re.S,
         )
+        self.assertIsNotNone(match, "feed trim loop missing")
+        body = match.group(1)
+        self.assertIn("box.firstChild", body)
+        self.assertIn("box.removeChild", body)
 
     def test_chart_history_is_hard_capped_server_side(self) -> None:
         # Chart history now lives on the server; hours of dense events must
