@@ -801,13 +801,131 @@ def classify_situation(
     return "unknown"
 
 
+class SystemEvents:
+    """The system's turning points, as an operator would narrate them.
+
+    The worker log is a stream of health snapshots; what an operator needs is
+    the moments — the stream dropped, the worker was adopted, a job started,
+    IPC went quiet. Those are visible only as DIFFERENCES between snapshots,
+    so this compares each one against the last and records what changed, with
+    a timestamp the snapshots themselves do not carry.
+
+    In-memory and bounded: the ring covers the recent past, which is what a
+    Logs tab is for; forensics belong to the worker log and the operation
+    journal on disk.
+    """
+
+    MAX_EVENTS = 300
+
+    def __init__(self) -> None:
+        self._ring: deque[dict[str, Any]] = deque(maxlen=self.MAX_EVENTS)
+        self._lock = threading.Lock()
+        self._prev: dict[str, Any] | None = None
+        self._prev_running: dict[str, int | None] = {}
+
+    def _emit(self, kind: str, text: str) -> None:
+        self._ring.append({"t": int(time.time()), "kind": kind, "text": text})
+
+    def observe(self, status: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._observe_locked(status, jobs)
+
+    def _observe_locked(self, status: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
+        worker = status.get("worker") or {}
+        connection = status.get("connection") or {}
+        previous = self._prev
+        if previous is not None:
+            prev_worker = previous.get("worker") or {}
+            prev_connection = previous.get("connection") or {}
+
+            pid, prev_pid = worker.get("pid"), prev_worker.get("pid")
+            if pid != prev_pid:
+                if pid is None:
+                    self._emit("worker", f"worker exited (was pid {prev_pid})")
+                elif prev_pid is None:
+                    owned = worker.get("owned_by_console")
+                    self._emit(
+                        "worker",
+                        f"worker {'started' if owned else 'adopted'} · pid {pid}",
+                    )
+                else:
+                    self._emit("worker", f"worker replaced · pid {prev_pid} → {pid}")
+
+            socket_now = bool(worker.get("socket_present"))
+            if socket_now != bool(prev_worker.get("socket_present")):
+                self._emit(
+                    "ipc", "IPC socket up" if socket_now else "IPC socket gone"
+                )
+
+            ipc_error, prev_ipc = connection.get("ipc_error"), prev_connection.get("ipc_error")
+            if ipc_error != prev_ipc:
+                if ipc_error:
+                    self._emit("ipc", f"IPC not responding ({ipc_error})")
+                elif prev_ipc:
+                    self._emit("ipc", "IPC recovered")
+
+            state, prev_state = connection.get("state"), prev_connection.get("state")
+            if state != prev_state:
+                self._emit("stream", f"stream {prev_state or '—'} → {state or '—'}")
+
+            reconnects = connection.get("reconnects")
+            prev_reconnects = prev_connection.get("reconnects")
+            if (
+                isinstance(reconnects, int)
+                and isinstance(prev_reconnects, int)
+                and reconnects > prev_reconnects
+            ):
+                self._emit("stream", f"stream reconnect #{reconnects}")
+
+            error = connection.get("last_error_type")
+            if error and error != prev_connection.get("last_error_type"):
+                code = connection.get("last_error_code")
+                self._emit(
+                    "stream", f"worker error: {error}{f' ({code})' if code else ''}"
+                )
+
+        running = {
+            job["name"]: job.get("pid") for job in jobs if job.get("running")
+        }
+        for name, pid in running.items():
+            if name not in self._prev_running:
+                self._emit("job", f"job {name} started · pid {pid}")
+        for name in self._prev_running:
+            if name not in running:
+                self._emit("job", f"job {name} stopped")
+        self._prev_running = running
+        self._prev = {"worker": dict(worker), "connection": dict(connection)}
+
+    def tail(self, limit: int = 120) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._ring)[-limit:]
+
+
 class ConsoleState:
     def __init__(self, supervisor: WorkerSupervisor, jobs: "JobSupervisor | None" = None) -> None:
         self.jobs = jobs or JobSupervisor()
         self.supervisor = supervisor
+        self.events = SystemEvents()
         self._bonjour: bool | None = None
         self._bonjour_checked_at = 0.0
         self._bonjour_lock = threading.Lock()
+
+    def start_watching(self) -> None:
+        """Track turning points once a second, browser open or not.
+
+        A dedicated thread rather than piggybacking on the SSE tick, because
+        the moments worth recording do not wait for someone to be watching.
+        """
+
+        def watch() -> None:
+            while True:
+                try:
+                    self.events.observe(self.status(), self.jobs.status())
+                except Exception:
+                    pass  # observation must never take the console down
+                time.sleep(1.0)
+
+        threading.Thread(target=watch, name="system-events", daemon=True).start()
 
     def bonjour(self) -> bool | None:
         with self._bonjour_lock:
@@ -974,6 +1092,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
         if route == "/api/status":
             self._send_json(self.console.status())
+            return
+        if route == "/api/syslog":
+            self._send_json({"ok": True, "events": self.console.events.tail()})
             return
         if route == "/api/snapshot":
             self._snapshot()
@@ -1152,6 +1273,7 @@ def main() -> int:
     )
     supervisor = WorkerSupervisor(args.state_dir, socket_path)
     console = ConsoleState(supervisor)
+    console.start_watching()
 
     handler = type("BoundHandler", (Handler,), {"console": console})
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)

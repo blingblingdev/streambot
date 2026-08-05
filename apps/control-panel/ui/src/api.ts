@@ -8,6 +8,7 @@ import type {
   JobRow,
   Status,
   StreamPayload,
+  SystemEvent,
 } from "./types";
 
 async function post<T = { ok: true }>(
@@ -42,6 +43,7 @@ export const api = {
     get<History>(`/api/jobs/history?name=${encodeURIComponent(name)}`),
   jobConfig: (name: string) =>
     get<JobConfig>(`/api/jobs/config?name=${encodeURIComponent(name)}`),
+  syslog: () => get<{ ok: true; events: SystemEvent[] }>("/api/syslog"),
 
   startWorker: () => post<{ ok: true; pid: number }>("/api/worker/start"),
   stopWorker: () => post("/api/worker/stop"),

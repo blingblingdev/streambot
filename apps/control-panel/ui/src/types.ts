@@ -164,6 +164,13 @@ export interface StreamPayload {
   jobs: JobRow[];
 }
 
+/** One narrated turning point: the stream dropped, a job started, IPC died. */
+export interface SystemEvent {
+  t: number;
+  kind: "worker" | "stream" | "ipc" | "job" | string;
+  text: string;
+}
+
 export interface ApiError {
   ok: false;
   error: string;

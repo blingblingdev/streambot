@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import { api, fetchOnce, isShotMode, useEventStream } from "./api";
 import type { FlowEvent, JobRow, StreamPayload } from "./types";
-import { fmtUptime, freshness, latencyGrade, scoreGrade, GRADE_TEXT } from "./lib/format";
+import { fmtUptime, latencyGrade, scoreGrade } from "./lib/format";
 import { mergeEvents } from "./lib/timeline";
 import { Button, Cell, Led, Section } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { Stage } from "./components/Stage";
 import { JobsDrawer } from "./components/JobsDrawer";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { LogsView } from "./components/LogsView";
 
 /** Why the worker is not simply running, in the worker's own words. Never
  *  guessed from process state: the old heuristic showed a frightening
@@ -165,11 +166,7 @@ export function App() {
       ) : null}
 
       {tab === "logs" ? (
-        <div className="min-h-0 flex-1 p-4">
-          <pre className="scroll-thin h-full overflow-auto rounded-[10px] border border-line bg-panel px-4 py-3.5 font-mono text-[12.5px] leading-[1.7] whitespace-pre-wrap text-muted">
-            {status?.log_tail?.join("\n") || "—"}
-          </pre>
-        </div>
+        <LogsView workerTail={status?.log_tail ?? []} />
       ) : (
         <div className="flex min-h-0 flex-1">
           <aside className="flex w-rail shrink-0 flex-col overflow-hidden border-r border-line bg-panel">
@@ -247,30 +244,6 @@ export function App() {
                   unit={metrics?.act_ms != null ? "ms" : undefined}
                   grade={latencyGrade(metrics?.act_ms, 400, 800)}
                 />
-              </div>
-            </Section>
-
-            <Section title="Stream">
-              {[
-                ["Status", connection?.state ?? (worker?.pid != null ? "starting" : "stopped")],
-                ["Reconnects", connection?.reconnects ?? "—"],
-                ["Detected controls", status?.scene.controls.length ?? "—"],
-              ].map(([label, value]) => (
-                <div
-                  key={String(label)}
-                  className="flex items-center justify-between border-b border-line/60 py-1.5 text-[12px] last:border-b-0"
-                >
-                  <span className="text-faint">{label}</span>
-                  <span className="font-mono">{value}</span>
-                </div>
-              ))}
-              <div className="flex items-center justify-between py-1.5 text-[12px]">
-                <span className="text-faint">Frame freshness</span>
-                <span
-                  className={`font-mono ${GRADE_TEXT[freshness(connection?.frame_age_ms).grade]}`}
-                >
-                  {freshness(connection?.frame_age_ms).text}
-                </span>
               </div>
             </Section>
 

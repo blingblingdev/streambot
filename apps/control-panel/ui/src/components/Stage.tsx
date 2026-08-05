@@ -11,9 +11,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api";
 import type { History, JobMetrics, SceneControl, Status } from "../types";
-import { GRADE_TEXT, latencyGrade, scoreGrade, type Grade } from "../lib/format";
+import {
+  GRADE_TEXT,
+  freshness,
+  latencyGrade,
+  scoreGrade,
+  type Grade,
+} from "../lib/format";
 import { PHASE_COLORS } from "../lib/timeline";
 import { Chart } from "./Charts";
+import { Led } from "./ui";
 
 const SCENE_SIZE = [1280, 720] as const;
 const AUTO_CADENCE = 60_000;
@@ -27,17 +34,22 @@ function Card({
   title,
   headline,
   grade = "",
+  header,
+  footer,
   children,
 }: {
   title: string;
   headline?: string;
   grade?: Grade;
+  header?: React.ReactNode;
+  footer?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <div className="flex min-h-0 flex-col overflow-hidden rounded-[10px] border border-line bg-panel">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-[11px] tracking-wide text-faint uppercase">
         {title}
+        {header}
         {headline !== undefined ? (
           <span className={`ml-auto font-mono text-[12.5px] ${GRADE_TEXT[grade]}`}>
             {headline}
@@ -45,6 +57,7 @@ function Card({
         ) : null}
       </div>
       <div className="relative min-h-0 flex-1">{children}</div>
+      {footer}
     </div>
   );
 }
@@ -178,47 +191,79 @@ export function Stage({
   const empty = useMemo(() => [], []);
   const cards = 5;
   const columns = cards <= 2 ? cards : Math.ceil(Math.sqrt(cards));
+  const connection = status?.connection;
+  const fresh = freshness(connection?.frame_age_ms);
 
   return (
     <div className="flex min-w-0 flex-1 flex-col">
-      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5 text-[12px]">
-        <span className="text-[10.5px] tracking-wide text-faint uppercase">Scene</span>
-        <span className="font-mono">{scene?.primary_layout || "Not yet recognized"}</span>
-        <span
-          className={
-            `rounded-full border px-2 py-0.5 text-[10.5px] ` +
-            (scene?.primary_layout == null
-              ? "border-line text-faint"
-              : scene.actionable
-                ? "border-ok/45 bg-ok/10 text-ok"
-                : "border-line text-muted")
-          }
-        >
-          {scene?.primary_layout == null ? "—" : scene.actionable ? "Actionable" : "Observing"}
-        </span>
-        <div className="flex-1" />
-        <div className="flex overflow-hidden rounded-md border border-line">
-          {CADENCES.map((cadence) => (
-            <button
-              key={cadence.rate}
-              onClick={() => setRate(cadence.rate)}
-              className={
-                `cursor-pointer px-2.5 py-1 font-mono text-[11px] ` +
-                (rate === cadence.rate
-                  ? "bg-blue/20 text-blue"
-                  : "text-muted hover:text-text")
-              }
-            >
-              {cadence.label}
-            </button>
-          ))}
-        </div>
-      </div>
       <div
         className="grid min-h-0 flex-1 gap-2.5 p-2.5"
         style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
       >
-        <Card title="Live frame">
+        <Card
+          title="Live frame"
+          header={
+            <>
+              <span className="ml-1 font-mono normal-case text-muted">
+                {scene?.primary_layout || "—"}
+              </span>
+              {scene?.primary_layout != null ? (
+                <span
+                  className={
+                    `rounded-full border px-1.5 py-px text-[9.5px] ` +
+                    (scene.actionable
+                      ? "border-ok/45 bg-ok/10 text-ok"
+                      : "border-line text-muted")
+                  }
+                >
+                  {scene.actionable ? "Actionable" : "Observing"}
+                </span>
+              ) : null}
+              <div className="ml-auto flex overflow-hidden rounded-md border border-line normal-case">
+                {CADENCES.map((cadence) => (
+                  <button
+                    key={cadence.rate}
+                    onClick={() => setRate(cadence.rate)}
+                    className={
+                      `cursor-pointer px-2 py-0.5 font-mono text-[10.5px] ` +
+                      (rate === cadence.rate
+                        ? "bg-blue/20 text-blue"
+                        : "text-muted hover:text-text")
+                    }
+                  >
+                    {cadence.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          }
+          footer={
+            // The stream's vitals belong on the stream's own picture: what
+            // state it is in, how fresh this frame is, how many times it has
+            // had to reconnect, and what it can see.
+            <div className="flex items-center gap-4 border-t border-line px-3 py-1.5 font-mono text-[11px] text-muted">
+              <span className="flex items-center gap-1.5">
+                <Led
+                  grade={
+                    connection?.state === "observing" || connection?.state === "acting"
+                      ? "ok"
+                      : connection?.state
+                        ? "warn"
+                        : ""
+                  }
+                />
+                {connection?.state ?? "stopped"}
+              </span>
+              <span className={GRADE_TEXT[fresh.grade]}>{fresh.text}</span>
+              <span className="ml-auto">
+                reconnects <span className="text-text">{connection?.reconnects ?? "—"}</span>
+              </span>
+              <span>
+                controls <span className="text-text">{scene?.controls.length ?? 0}</span>
+              </span>
+            </div>
+          }
+        >
           <LiveFrame
             controls={scene?.controls ?? []}
             recommended={scene?.recommended_control_id ?? null}
