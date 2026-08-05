@@ -983,6 +983,26 @@ class JobSupervisor:
                         "configurable": configurable,
                     }
                 )
+            # A job ending does not erase what happened: the flow log outlives
+            # the process. When nothing is running the feed follows the most
+            # recently active log instead of going blank. (Metrics stay None —
+            # a stopped job has no live rates worth showing.)
+            if not any(row["running"] for row in rows):
+                freshest: dict[str, Any] | None = None
+                freshest_mtime = 0.0
+                for row in rows:
+                    try:
+                        mtime = (
+                            JOBS_ROOT / row["name"] / "flow-log.jsonl"
+                        ).stat().st_mtime
+                    except OSError:
+                        continue
+                    if mtime > freshest_mtime:
+                        freshest, freshest_mtime = row, mtime
+                if freshest is not None:
+                    reader = self._flow_reader(freshest["name"])
+                    reader.poll()
+                    freshest["events"] = reader.recent_events()
         return rows
 
 

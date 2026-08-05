@@ -76,6 +76,22 @@ export function mergeEvents(
   return [...held, ...fresh].slice(-max);
 }
 
+/**
+ * Which job the feed follows: the running one, else whichever stopped job the
+ * server still serves events for (it picks the most recently active log). A
+ * job ending therefore does not blank the feed — the worker outlives its
+ * jobs, and so does what streambot recorded through them.
+ */
+export function feedSource<T extends { running: boolean; events: unknown[] }>(
+  jobs: T[],
+): T | null {
+  return (
+    jobs.find((job) => job.running) ??
+    jobs.find((job) => job.events.length > 0) ??
+    null
+  );
+}
+
 export interface Placement {
   left: number;
   top: number;

@@ -151,6 +151,47 @@ class FeedDomBoundTest(unittest.TestCase):
         self.assertIn(0.0, perceive)  # the idle gap
 
 
+class FeedAfterJobEndTests(unittest.TestCase):
+    """A finished job's events stay served: streambot's data outlives the job."""
+
+    def test_status_serves_the_last_active_log_when_nothing_runs(self) -> None:
+        now = int(time.time())
+        registry = {
+            name: {"name": name, "title": name, "description": "",
+                   "runner": [f"jobs/{name}/runner.py"]}
+            for name in ("job-a", "job-b")
+        }
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, age in (("job-a", 600), ("job-b", 30)):
+                (root / name).mkdir()
+                log = root / name / "flow-log.jsonl"
+                write_lines(log, [
+                    {"t": now - age, "event": "start"},
+                    {"t": now - age + 5, "event": "click", "element": name,
+                     "score": 0.9},
+                    {"t": now - age + 9, "event": "done", "reason": "finished"},
+                ])
+                server.os.utime(log, (now - age, now - age))
+            supervisor = server.JobSupervisor()
+            with mock.patch.object(
+                server.JobSupervisor, "registry", staticmethod(lambda: registry)
+            ), mock.patch.object(
+                supervisor, "_external_pids", return_value={}
+            ), mock.patch.object(server, "JOBS_ROOT", root):
+                rows = {row["name"]: row for row in supervisor.status()}
+
+        self.assertFalse(any(row["running"] for row in rows.values()))
+        # Only the most recently active job speaks for the feed…
+        self.assertEqual(
+            [e["event"] for e in rows["job-b"]["events"]],
+            ["start", "click", "done"],
+        )
+        self.assertEqual(rows["job-a"]["events"], [])
+        # …and a stopped job never reports live rates.
+        self.assertIsNone(rows["job-b"]["metrics"])
+
+
 class JobAdoptionTests(unittest.TestCase):
     """A restarted console re-adopts running jobs and can stop them safely."""
 

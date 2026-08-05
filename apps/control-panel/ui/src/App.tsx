@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, fetchOnce, isShotMode, useEventStream } from "./api";
 import type { FlowEvent, JobRow, StreamPayload } from "./types";
 import { fmtUptime, latencyGrade, scoreGrade } from "./lib/format";
-import { mergeEvents } from "./lib/timeline";
+import { feedSource, mergeEvents } from "./lib/timeline";
 import {
   RAIL_DEFAULT,
   clampRailWidth,
@@ -13,6 +13,7 @@ import {
 import { NARROW_QUERY, useMediaQuery } from "./lib/useMediaQuery";
 import { Button, Cell, Led, Section } from "./components/ui";
 import { Timeline } from "./components/Timeline";
+import { LivePanel } from "./components/LivePanel";
 import { Stage } from "./components/Stage";
 import { JobsDrawer } from "./components/JobsDrawer";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -117,16 +118,19 @@ export function App() {
   const worker = status?.worker;
   const metrics = running?.metrics ?? null;
 
-  // The feed belongs to one job; a different one starts it over.
+  // The feed follows the running job, or — when nothing runs — whichever job
+  // last wrote its flow log (the server keeps serving it). A job ending never
+  // clears the feed; only a *different* job starting begins a new one.
   useEffect(() => {
-    const name = running?.name ?? null;
-    if (name !== feedJob) {
-      setFeedJob(name);
-      setEvents(name ? (running?.events ?? []) : []);
+    const source = feedSource(jobs);
+    if (!source) return; // nothing to show yet — hold whatever we have
+    if (source.name !== feedJob) {
+      setFeedJob(source.name);
+      setEvents(source.events);
       return;
     }
-    if (running) setEvents((held) => mergeEvents(held, running.events));
-  }, [running, feedJob]);
+    setEvents((held) => mergeEvents(held, source.events));
+  }, [jobs, feedJob]);
 
   const streaming = connection?.state === "observing" || connection?.state === "acting";
   const detached = connection?.state === "detached";
@@ -239,6 +243,9 @@ export function App() {
             }
             style={narrow ? undefined : { width: railWidth }}
           >
+            {/* The worker's eye leads the rail; on a narrow screen the rail
+                is capped, so the frame joins the stacked cards instead. */}
+            {narrow ? null : <LivePanel status={status} />}
             <Section
               title="Running"
               className={running ? "" : "opacity-60"}
@@ -317,8 +324,13 @@ export function App() {
             </Section>
 
             <section className="flex min-h-0 flex-1 flex-col">
-              <h2 className="flex items-center gap-2 px-3.5 pt-3 pb-1.5 text-[10.5px] font-semibold tracking-[.09em] text-faint uppercase">
+              <h2 className="flex flex-wrap items-center gap-2 px-3.5 pt-3 pb-1.5 text-[10.5px] font-semibold tracking-[.09em] text-faint uppercase">
                 Timeline
+                {feedJob && !running ? (
+                  <span className="rounded-full border border-line px-1.5 py-px font-mono text-[9px] font-normal tracking-normal normal-case text-muted">
+                    {feedJob} · ended
+                  </span>
+                ) : null}
                 <span className="flex items-center gap-2.5 text-[9.5px] font-normal tracking-normal">
                   {[
                     ["#3d444d", "transport"],

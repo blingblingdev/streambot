@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   FEED_MAX_ROWS,
+  feedSource,
   hasTiming,
   mergeEvents,
   phases,
@@ -70,6 +71,29 @@ describe("mergeEvents", () => {
   test("a restarted job renumbers from the start, so the feed starts over", () => {
     const held = [look(80), look(81)];
     expect(mergeEvents(held, [look(1), look(2)]).map((e) => e.i)).toEqual([1, 2]);
+  });
+});
+
+describe("feedSource", () => {
+  const job = (name: string, running: boolean, events: number) => ({
+    name,
+    running,
+    events: Array.from({ length: events }, (_, i) => look(i + 1)),
+  });
+
+  test("a running job always owns the feed", () => {
+    const jobs = [job("ended", false, 3), job("active", true, 1)];
+    expect(feedSource(jobs)?.name).toBe("active");
+  });
+
+  test("a finished job keeps the feed instead of blanking it", () => {
+    expect(feedSource([job("quiet", false, 0), job("ended", false, 3)])?.name).toBe(
+      "ended",
+    );
+  });
+
+  test("nothing ever ran: nothing to follow", () => {
+    expect(feedSource([job("quiet", false, 0)])).toBeNull();
   });
 });
 
