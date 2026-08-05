@@ -67,6 +67,25 @@ A runner talks to the worker over its control socket
 - `dispatch` `{control_id}` — click a control the job previously reported.
 - `report-scene` `{primary_layout, controls, recommended_control_id, ...}` —
   publish what the job currently detects; this becomes the console overlay.
+- `register-elements` `{declaration_path, assets_dir}` — hand the worker an
+  element declaration (see `streambot.elements`). It loads and validates the
+  templates the declaration names and keeps a working copy for this session
+  only; the files, their provenance and their history stay in the job.
+- `analyze` `{elements}` — classify the latest frame and locate those elements
+  (all declared ones if omitted), returning `{screen, instances, classify_ms,
+  resolve_ms}`. Runs on the calling connection's thread, so it neither waits
+  for the frame loop nor delays anyone else's `status`.
+
+Pass `job="<name>"` to `send_control_command` on every call. Each operation the
+worker performs — a look, an analysis, an input — is appended to
+`.state/<worker>/operations.jsonl` with that name, its outcome and its
+duration. That record is the platform's, not the job's: it says what was done
+to the machine, while the job's own `flow-log.jsonl` says what the job meant.
+
+Analysis belongs here rather than in each job for two reasons. It is the same
+pipeline every target needs, so a job that implements it again is maintaining a
+copy of the platform. And an operation the worker performs is one the worker
+can account for — anything a job does with its own matcher is invisible.
 
 ## Click-loop recipe
 

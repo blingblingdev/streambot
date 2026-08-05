@@ -81,8 +81,20 @@ platform, importable from the project venv via a `.pth` entry created by
   worker entry script delegates to (connection factory, health emission,
   signal wiring, result line). No script outside the package may construct
   its own connection; entry scripts stay thin argument parsers.
+- `elements.py` — the declarative *locator*: given a frame and a declaration
+  (templates as `.npy` plus thresholds as data), classify the screen and return
+  where each named element is. Distinct from `perception.py`, which answers
+  yes/no about fixed regions; it uses `TM_CCOEFF_NORMED` plus a colour gate
+  because that pair was measured against pulsing controls, and a binary-glyph
+  path for icons drawn over changing scenery.
+- `operations.py` — the append-only, metadata-only record of every operation
+  the worker performs, attributed to the job that asked. Written by the
+  platform so the audit trail does not depend on each job cooperating.
 - `control_plane.py` — a local Unix-socket IPC surface (snapshot, click, status,
-  dispatch, `report-scene`) so a job or the console can drive the worker.
+  dispatch, `report-scene`, `register-elements`, `analyze`) so a job or the
+  console can drive the worker. Actions are serialized onto one executor
+  thread; looks (status, snapshot, analyze) answer on the calling connection's
+  own thread, so neither blocks the frame loop or each other.
 - `config.py`, `models.py`, `events.py`, `ocr.py`,
   `scene.py`, `control_surface.py` — supporting types and adapters.
 

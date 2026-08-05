@@ -22,13 +22,23 @@ from uuid import uuid4
 import numpy as np
 from PIL import Image
 
+from streambot.config import ConfigurationError
+from streambot.elements import ElementResolver, load_declaration
 from streambot.input import SafeInputDriver
 from streambot.observation import Observation
+from streambot.operations import ACT, ANALYZE, OBSERVE, REGISTER, OperationJournal
 from streambot.watchdog import StallWatchdog
 
 
 DEFAULT_SOCKET_PATH = Path(".state/poc/control.sock")
 MAX_RESPONSE_BYTES = 1_048_576
+
+# How many elements one analyze request may ask for. Work is bounded at the
+# input rather than by a wall clock: a match in progress cannot be interrupted,
+# so the honest guard is to limit what can be asked for (this, plus the
+# template size and count caps enforced when a declaration is registered) and
+# to record how long each analysis actually took.
+MAX_ANALYZE_ELEMENTS = 32
 
 
 @dataclass
@@ -70,10 +80,21 @@ class PersistentControlPlane:
         *,
         clock=time.monotonic,
         allow_frame_export: bool = False,
+        journal: OperationJournal | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.clock = clock
         self.allow_frame_export = allow_frame_export
+        # The audit trail lives beside the worker's own state, not in any
+        # job's directory: it spans every job this worker serves.
+        self.journal = journal or OperationJournal(
+            socket_path.parent / "operations.jsonl"
+        )
+        # Element declarations registered by jobs. The worker holds a working
+        # copy for the life of this control plane and nothing more: templates
+        # are owned, versioned and recorded by the job that registered them.
+        self._element_lock = Lock()
+        self._element_resolvers: dict[str, ElementResolver] = {}
         self._automation_enabled = False
         self._commands: Queue[PendingCommand] = Queue(maxsize=32)
         self._stop = Event()
@@ -200,6 +221,10 @@ class PersistentControlPlane:
             self._thread.join(timeout=2.0)
         if self._executor is not None:
             self._executor.join(timeout=2.0)
+        with self._element_lock:
+            # Registered declarations are session state: they go when the
+            # session goes, so a restarted job never inherits stale templates.
+            self._element_resolvers.clear()
         if self.socket_path.exists():
             self.socket_path.unlink()
 
@@ -519,8 +544,114 @@ class PersistentControlPlane:
         self.publish_page_state(frame_number, payload)
         return {"ok": True, "command": "report-scene", "controls": len(controls)}
 
+    def registered_jobs(self) -> list[str]:
+        """Jobs whose element declarations this session currently holds."""
+
+        with self._element_lock:
+            return sorted(self._element_resolvers)
+
+    def register_elements(self, job: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Adopt a job's element declaration for the life of this session.
+
+        The job hands over a path, not bytes: templates stay where the job
+        recorded them, with their provenance and history, and the worker keeps
+        only a loaded working copy. Everything is validated here — dtype,
+        shape, per-template and total size, element and screen counts — so a
+        malformed declaration is refused once, at registration, instead of
+        surfacing as a strange match in the middle of a run.
+        """
+
+        started = time.perf_counter()
+        declaration_path = arguments.get("declaration_path")
+        if not declaration_path:
+            return {"ok": False, "error": "MissingDeclarationPath"}
+        assets_dir = arguments.get("assets_dir")
+        try:
+            declaration = load_declaration(
+                Path(str(declaration_path)).expanduser(),
+                Path(str(assets_dir)).expanduser() if assets_dir else None,
+            )
+        except ConfigurationError as error:
+            self.journal.record(
+                REGISTER, job=job, ok=False,
+                ms=(time.perf_counter() - started) * 1000.0,
+                error="ConfigurationError", detail=str(error),
+            )
+            return {"ok": False, "error": "InvalidDeclaration", "detail": str(error)}
+        with self._element_lock:
+            self._element_resolvers[job] = ElementResolver(declaration)
+        summary = declaration.summary()
+        self.journal.record(
+            REGISTER, job=job, ms=(time.perf_counter() - started) * 1000.0, **summary
+        )
+        return {"ok": True, "command": "register-elements", **summary}
+
+    def analyze(self, job: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Classify the latest frame and locate the requested elements.
+
+        Runs on the calling connection's own thread, like `snapshot`: the
+        frame loop is never made to wait for it, and two jobs analysing at
+        once are two threads. The frame is copied under the lock and matched
+        outside it, so the observer is blocked only for the copy.
+        """
+
+        with self._element_lock:
+            resolver = self._element_resolvers.get(job)
+        if resolver is None:
+            return {"ok": False, "error": "NoElementsRegistered"}
+        elements = arguments.get("elements")
+        if elements is not None:
+            if not isinstance(elements, list):
+                return {"ok": False, "error": "InvalidElements"}
+            if len(elements) > MAX_ANALYZE_ELEMENTS:
+                return {"ok": False, "error": "TooManyElements"}
+            elements = [str(name) for name in elements]
+        with self._lock:
+            if self._latest_frame is None:
+                return {"ok": False, "error": "NoFrameAvailable"}
+            frame = self._latest_frame.copy()
+            frame_number = self._latest_frame_number
+        started = time.perf_counter()
+        try:
+            analysis = resolver.analyze(frame, elements=elements)
+        except ConfigurationError as error:
+            self.journal.record(
+                ANALYZE, job=job, ok=False, frame_number=frame_number,
+                ms=(time.perf_counter() - started) * 1000.0,
+                error="ConfigurationError", detail=str(error),
+            )
+            return {"ok": False, "error": "InvalidRequest", "detail": str(error)}
+        payload = analysis.as_dict()
+        self.journal.record(
+            ANALYZE,
+            job=job,
+            frame_number=frame_number,
+            ms=(time.perf_counter() - started) * 1000.0,
+            screen=payload["screen"],
+            classify_ms=payload["classify_ms"],
+            resolve_ms=payload["resolve_ms"],
+            found=[
+                {
+                    "element": instance["element"],
+                    "center": instance["center"],
+                    "score": instance["score"],
+                }
+                for instance in payload["instances"]
+            ],
+        )
+        return {
+            "ok": True,
+            "command": "analyze",
+            "frame_number": frame_number,
+            **payload,
+        }
+
     def _handle_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         command = str(payload.get("command", ""))
+        # Optional attribution: which job asked. Recorded with the operation
+        # so the audit trail says who, not just what.
+        job = payload.get("job")
+        job = str(job) if job else None
         if command == "status":
             return self.status()
         if command == "controls":
@@ -533,42 +664,86 @@ class PersistentControlPlane:
                 return {"ok": False, "error": "ConnectionControlUnavailable"}
             handler()
             return {"ok": True, "command": command}
+        if command == "register-elements":
+            if job is None:
+                return {"ok": False, "error": "MissingJob"}
+            return self.register_elements(job, dict(payload.get("arguments", {})))
+        if command == "analyze":
+            if job is None:
+                return {"ok": False, "error": "MissingJob"}
+            return self.analyze(job, dict(payload.get("arguments", {})))
         if command == "snapshot":
             if not self.allow_frame_export:
                 return {"ok": False, "error": "FrameExportDisabled"}
+            started = time.perf_counter()
             output = Path(str(payload["output"])).expanduser().resolve()
             with self._lock:
                 if self._latest_frame is None:
+                    self.journal.record(
+                        OBSERVE, job=job, ok=False, error="NoFrameAvailable"
+                    )
                     return {"ok": False, "error": "NoFrameAvailable"}
                 frame = self._latest_frame.copy()
                 frame_number = self._latest_frame_number
             output.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(frame[:, :, ::-1]).save(output)
+            self.journal.record(
+                OBSERVE, job=job, frame_number=frame_number,
+                ms=(time.perf_counter() - started) * 1000.0,
+            )
             return {"ok": True, "frame_number": frame_number, "output": str(output)}
         if command not in self.ACTION_COMMANDS:
             return {"ok": False, "error": "UnsupportedCommand"}
-        # An action, not a look: snapshots and status are how the job WATCHES
-        # the game, and counting them as activity would mean a job that has
-        # frozen while polling the screen never trips the alarm.
+        # An action, not a look: snapshots, analyses and status are how the job
+        # WATCHES the game, and counting them as activity would mean a job that
+        # has frozen while polling the screen never trips the alarm.
         self._watchdog.touch(command)
+        started = time.perf_counter()
         request_id = str(payload.get("id") or uuid4().hex)
-        pending = PendingCommand(request_id, command, dict(payload.get("arguments", {})))
+        arguments = dict(payload.get("arguments", {}))
+        pending = PendingCommand(request_id, command, arguments)
         self._commands.put(pending, timeout=0.5)
         if not pending.completed.wait(timeout=3.0):
+            self.journal.record(
+                ACT, job=job, ok=False, command=command,
+                ms=(time.perf_counter() - started) * 1000.0, error="CommandTimeout",
+            )
             return {"ok": False, "error": "CommandTimeout"}
-        return pending.response or {"ok": False, "error": "MissingResponse"}
+        response = pending.response or {"ok": False, "error": "MissingResponse"}
+        self.journal.record(
+            ACT,
+            job=job,
+            ok=bool(response.get("ok", False)),
+            command=command,
+            ms=(time.perf_counter() - started) * 1000.0,
+            arguments=arguments,
+            error=response.get("error"),
+        )
+        return response
 
 
 def send_control_command(
-    socket_path: Path, command: str, *, arguments: dict[str, Any] | None = None
+    socket_path: Path,
+    command: str,
+    *,
+    arguments: dict[str, Any] | None = None,
+    job: str | None = None,
 ) -> dict[str, Any]:
-    """Send one small JSON request to the already-connected worker."""
+    """Send one small JSON request to the already-connected worker.
+
+    `job` names the caller so the worker can attribute the operation in its
+    record. It travels beside the arguments rather than inside them, because
+    arguments are handed to the input driver and must stay exactly what the
+    command means.
+    """
 
     payload = {
         "id": uuid4().hex,
         "command": command,
         "arguments": arguments or {},
     }
+    if job:
+        payload["job"] = job
     if command == "snapshot" and arguments:
         payload["output"] = arguments["output"]
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
