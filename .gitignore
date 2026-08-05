@@ -8,3 +8,7 @@ __pycache__/
 .fixtures/
 jobs/*/pilot-log.jsonl
 jobs/*/flow-log.jsonl
+
+# Frontend toolchain (the built bundle under apps/control-panel/static IS
+# committed — the console must run with no JavaScript toolchain present).
+node_modules/
