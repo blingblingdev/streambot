@@ -162,11 +162,13 @@ function LiveFrame({
 
 export function Stage({
   status,
-  jobName,
+  jobNames,
+  runningName,
   metrics,
 }: {
   status: Status | null;
-  jobName: string | null;
+  jobNames: string[];
+  runningName: string | null;
   metrics: JobMetrics | null;
 }) {
   const [rate, setRate] = useState(60_000);
@@ -175,6 +177,14 @@ export function Stage({
   // stays where the operator dragged it (pinned).
   const [range, setRange] = useState(3600);
   const [pinnedEnd, setPinnedEnd] = useState<number | null>(null);
+  // Whose history. Follows the running job, but STAYS when it stops — the
+  // store keeps thirty days precisely so that a stopped job's charts do not
+  // vanish — and any job can be chosen by hand.
+  const [chosen, setChosen] = useState<string | null>(null);
+  useEffect(() => {
+    if (runningName) setChosen(runningName);
+  }, [runningName]);
+  const jobName = chosen ?? runningName ?? jobNames[0] ?? null;
   const scene = status?.scene;
 
   useEffect(() => {
@@ -227,6 +237,20 @@ export function Stage({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5 text-[11px]">
         <span className="tracking-wide text-faint uppercase">History</span>
+        {jobNames.length > 1 ? (
+          <select
+            value={jobName ?? ""}
+            onChange={(event) => setChosen(event.target.value)}
+            className="max-w-[180px] rounded-md border border-line bg-panel2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted"
+          >
+            {jobNames.map((name) => (
+              <option key={name} value={name}>
+                {name}
+                {name === runningName ? " ●" : ""}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <div className="flex overflow-hidden rounded-md border border-line">
           {RANGE_PRESETS.map((preset) => (
             <button

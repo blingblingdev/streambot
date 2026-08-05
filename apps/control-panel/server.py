@@ -446,6 +446,10 @@ class MetricsStore:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(self.path), check_same_thread=False)
+        # Must precede table creation to take effect on a fresh file: without
+        # it, retention deletes free pages but the file never shrinks, so a
+        # month-old console would plateau at its historical maximum forever.
+        self._db.execute("pragma auto_vacuum=incremental")
         self._db.execute("pragma journal_mode=WAL")
         self._db.execute("pragma synchronous=NORMAL")
         self._db.executescript(
@@ -504,6 +508,33 @@ class MetricsStore:
             self._db.executemany(
                 "insert or replace into points values(?,?,?,?)", rows
             )
+            # Data can arrive from behind the watermark: a job's log ingested
+            # for the first time after the rollup has already advanced (this
+            # is exactly how a stopped job's July history arrives in August).
+            # Those buckets were folded before the data existed, so refold
+            # them for the jobs just written — whole buckets, so idempotent.
+            row = self._db.execute(
+                "select value from meta where key='rollup_watermark'"
+            ).fetchone()
+            watermark = int(row[0]) if row else 0
+            oldest = min(r[2] for r in rows)
+            if watermark and oldest < watermark:
+                for job in {r[0] for r in rows}:
+                    self._db.execute(
+                        """
+                        insert or replace into rollup
+                        select job, series, (t / ?) * ? as bucket, sum(value), count(*)
+                        from points where job=? and t >= ? and t < ?
+                        group by job, series, bucket
+                        """,
+                        (
+                            self.ROLLUP_STEP,
+                            self.ROLLUP_STEP,
+                            job,
+                            (oldest // self.ROLLUP_STEP) * self.ROLLUP_STEP,
+                            watermark,
+                        ),
+                    )
             self._db.commit()
             self._retention_locked()
 
@@ -516,6 +547,7 @@ class MetricsStore:
         self._db.execute("delete from points where t < ?", (horizon,))
         self._db.execute("delete from rollup where bucket < ?", (horizon,))
         self._db.commit()
+        self._db.execute("pragma incremental_vacuum")
 
     def _advance_rollup_locked(self) -> None:
         """Fold completed five-minute buckets of raw into the rollup.

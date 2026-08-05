@@ -127,6 +127,22 @@ class MetricsStoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(remaining, 0)
 
+    def test_history_ingested_after_the_rollup_advanced_is_still_visible(self) -> None:
+        # The stopped-job case: job A ran weeks ago; the store's rollup has
+        # long since advanced past those buckets (driven by job B's live
+        # queries); only then is A's old log ingested for the first time. A
+        # wide window on A must still show it.
+        self.ingest("b", [look(NOW - 60)])
+        self.store.history("b", NOW - 7 * 24 * 3600, NOW)  # advances the watermark
+        week_ago = NOW - 7 * 24 * 3600 + 600
+        self.ingest("a", [look(week_ago + i * 2, perceive=75.0) for i in range(100)])
+        wide = self.store.history("a", NOW - 14 * 24 * 3600, NOW)
+        self.assertGreater(wide["step"], 60)  # wide enough to use the rollup
+        self.assertTrue(
+            any(v > 0 for v in wide["series"]["perceive"]),
+            "backfilled history vanished behind the rollup watermark",
+        )
+
     # ---------------------------------------------------------------- speed
 
     def test_a_thirty_day_window_answers_fast_from_the_rollup(self) -> None:

@@ -352,7 +352,12 @@ export function App() {
             />
           )}
 
-          <Stage status={status} jobName={running?.name ?? null} metrics={metrics} />
+          <Stage
+            status={status}
+            jobNames={jobs.map((job) => job.name)}
+            runningName={running?.name ?? null}
+            metrics={metrics}
+          />
         </div>
       )}
 
