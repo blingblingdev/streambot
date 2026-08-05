@@ -19,6 +19,13 @@ from .control_surface import (
     ManifestError,
     load_control_manifest,
 )
+from .elements import (
+    Analysis,
+    ElementDeclaration,
+    ElementResolver,
+    Instance,
+    load_declaration,
+)
 from .layout_detection import LayoutDetector
 from .decision import EngineSnapshot, TransitionEvent, WorkflowEngine
 from .input import MoonlightCffiTransport, SafeInputDriver
@@ -50,6 +57,7 @@ from .scene import (
 )
 
 __all__ = [
+    "Analysis",
     "AutomationProfile",
     "AutomationWorker",
     "AutomationMoonlightClient",
@@ -57,6 +65,9 @@ __all__ = [
     "BranchLedgerError",
     "Control",
     "ControlFact",
+    "ElementDeclaration",
+    "ElementResolver",
+    "Instance",
     "LayoutDetector",
     "LineOcrAdapter",
     "ManifestControlScanner",
@@ -101,6 +112,7 @@ __all__ = [
     "NoHostVisible",
     "connect_paired_worker",
     "desktop_session_is_active",
+    "load_declaration",
     "load_profile",
     "health_payload",
     "run_worker_process",
