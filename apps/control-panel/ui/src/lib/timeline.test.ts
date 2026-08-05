@@ -136,6 +136,31 @@ describe("panWindow", () => {
   });
 });
 
+describe("window helpers", () => {
+  test("a selected range clamps like a pan does", async () => {
+    const { clampWindow } = await import("./timerange");
+    const now = 100_000;
+    expect(clampWindow(90_000, 93_600, now)).toEqual({
+      start: 90_000,
+      end: 93_600,
+      live: false,
+    });
+    // Backwards selection is still a window; a sliver becomes a minute.
+    expect(clampWindow(93_600, 90_000, now).end - clampWindow(93_600, 90_000, now).start).toBe(3600);
+    expect(clampWindow(99_990, 99_995, now).end - clampWindow(99_990, 99_995, now).start).toBe(60);
+  });
+
+  test("the picker label reads relative live and absolute pinned", async () => {
+    const { humanizeRange, windowLabel } = await import("./timerange");
+    expect(humanizeRange(3600)).toBe("1h");
+    expect(humanizeRange(5400)).toBe("1.5h");
+    expect(humanizeRange(300)).toBe("5m");
+    const now = Math.floor(Date.now() / 1000);
+    expect(windowLabel(3600, null, now)).toBe("Last 1h");
+    expect(windowLabel(600, now - 60, now)).toContain("→");
+  });
+});
+
 describe("rail width", () => {
   test("clamps to its bounds and rejects nonsense", async () => {
     const { clampRailWidth, RAIL_DEFAULT, RAIL_MAX, RAIL_MIN } = await import("./rail");

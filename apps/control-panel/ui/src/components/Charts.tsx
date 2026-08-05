@@ -11,7 +11,7 @@
  * renderer, and nothing else.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
 import {
@@ -85,6 +85,7 @@ export function Chart({
   window: win,
   format,
   onPan,
+  onSelect,
 }: {
   /** One line per job, all on the shared window grid. */
   lines: ChartLine[];
@@ -92,11 +93,46 @@ export function Chart({
   format: (value: number) => string;
   /** A drag/zoom gesture, as percentages of the shown window. */
   onPan?: (startPct: number, endPct: number) => void;
+  /** A shift-drag selection, in absolute seconds. */
+  onSelect?: (startSec: number, endSec: number) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const chart = useRef<echarts.ECharts | null>(null);
   const panRef = useRef(onPan);
   panRef.current = onPan;
+  const selectRef = useRef(onSelect);
+  selectRef.current = onSelect;
+  // The selection rectangle while a shift-drag is in flight, in host px.
+  const [band, setBand] = useState<{ x0: number; x1: number } | null>(null);
+
+  // Shift-drag selects a time range, the way a monitoring tool zooms in.
+  // Captured on the host before echarts sees it, so the pan gesture the
+  // chart would otherwise perform never starts.
+  const beginSelect = (down: React.PointerEvent) => {
+    if (!down.shiftKey || !host.current || !chart.current) return;
+    down.preventDefault();
+    down.stopPropagation();
+    const rect = host.current.getBoundingClientRect();
+    const origin = down.clientX - rect.left;
+    setBand({ x0: origin, x1: origin });
+    const move = (event: PointerEvent) =>
+      setBand({ x0: origin, x1: event.clientX - rect.left });
+    const up = (event: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      setBand(null);
+      const landed = event.clientX - rect.left;
+      if (Math.abs(landed - origin) < 5 || !chart.current) return;
+      const toSec = (x: number): number | null => {
+        const point = chart.current!.convertFromPixel({ gridIndex: 0 }, [x, 0]);
+        return point ? Math.round(point[0]! / 1000) : null;
+      };
+      const a = toSec(Math.min(origin, landed));
+      const b = toSec(Math.max(origin, landed));
+      if (a !== null && b !== null && b > a) selectRef.current?.(a, b);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+  };
 
   useEffect(() => {
     if (!host.current) return;
@@ -148,5 +184,21 @@ export function Chart({
     );
   }, [lines, win]);
 
-  return <div ref={host} className="absolute inset-0" />;
+  return (
+    <div
+      ref={host}
+      onPointerDownCapture={beginSelect}
+      className="absolute inset-0"
+    >
+      {band ? (
+        <div
+          className="pointer-events-none absolute inset-y-2 z-10 border-x border-blue/60 bg-blue/15"
+          style={{
+            left: Math.min(band.x0, band.x1),
+            width: Math.abs(band.x1 - band.x0),
+          }}
+        />
+      ) : null}
+    </div>
+  );
 }

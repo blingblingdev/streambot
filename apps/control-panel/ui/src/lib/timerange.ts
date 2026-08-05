@@ -43,24 +43,21 @@ export function jobColor(name: string, allJobs: string[]): string {
   ]!;
 }
 
+export interface Window {
+  start: number;
+  end: number;
+  live: boolean;
+}
+
 /**
- * Where a pan/zoom gesture lands, in absolute seconds.
- *
- * The chart reports the gesture as percentages of the window it was showing;
- * this maps them back onto that window and clamps: the future does not exist
+ * Clamp any requested window to one that can exist: the future does not exist
  * yet, history ends at the retention horizon, and a window can never collapse
- * below a minute.
+ * below a minute. Landing against now reads as "follow now again".
  */
-export function panWindow(
-  shownStart: number,
-  shownEnd: number,
-  startPct: number,
-  endPct: number,
-  now: number,
-): { start: number; end: number; live: boolean } {
-  const width = shownEnd - shownStart;
-  let start = Math.round(shownStart + (startPct / 100) * width);
-  let end = Math.round(shownStart + (endPct / 100) * width);
+export function clampWindow(start: number, end: number, now: number): Window {
+  start = Math.round(start);
+  end = Math.round(end);
+  if (end < start) [start, end] = [end, start];
   if (end - start < 60) end = start + 60;
   if (end > now) {
     start -= end - now;
@@ -69,6 +66,54 @@ export function panWindow(
   const oldest = now - MAX_RANGE_SECONDS;
   if (start < oldest) start = oldest;
   if (end - start < 60) end = start + 60;
-  // Panned right up against now reads as "follow now again".
   return { start, end, live: now - end < 10 };
+}
+
+/**
+ * Where a pan/zoom gesture lands, in absolute seconds. The chart reports the
+ * gesture as percentages of the window it was showing.
+ */
+export function panWindow(
+  shownStart: number,
+  shownEnd: number,
+  startPct: number,
+  endPct: number,
+  now: number,
+): Window {
+  const width = shownEnd - shownStart;
+  return clampWindow(
+    shownStart + (startPct / 100) * width,
+    shownStart + (endPct / 100) * width,
+    now,
+  );
+}
+
+/** "Last 1h", or the span in the largest unit that reads cleanly. */
+export function humanizeRange(seconds: number): string {
+  const preset = RANGE_PRESETS.find((p) => p.seconds === seconds);
+  if (preset) return preset.label;
+  if (seconds % 86400 === 0) return `${seconds / 86400}d`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)}h`;
+  return `${Math.max(1, Math.round(seconds / 60))}m`;
+}
+
+function stamp(t: number, withDate: boolean): string {
+  const d = new Date(t * 1000);
+  const hm = d.toTimeString().slice(0, 5);
+  if (!withDate) return hm;
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+}
+
+/** What the picker button says: a relative label live, absolute when pinned. */
+export function windowLabel(
+  rangeSeconds: number,
+  pinnedEnd: number | null,
+  now: number,
+): string {
+  if (pinnedEnd === null) return `Last ${humanizeRange(rangeSeconds)}`;
+  const start = pinnedEnd - rangeSeconds;
+  const days = new Date(start * 1000).toDateString() !== new Date(pinnedEnd * 1000).toDateString()
+    || new Date(start * 1000).toDateString() !== new Date(now * 1000).toDateString();
+  return `${stamp(start, days)} → ${stamp(pinnedEnd, days)}`;
 }

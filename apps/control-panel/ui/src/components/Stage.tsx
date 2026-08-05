@@ -19,9 +19,9 @@ import {
   type Grade,
 } from "../lib/format";
 import { NARROW_QUERY, useMediaQuery } from "../lib/useMediaQuery";
-import { RANGE_PRESETS, jobColor, panWindow } from "../lib/timerange";
-import { fmtClock } from "../lib/format";
+import { clampWindow, jobColor, panWindow } from "../lib/timerange";
 import { Chart, type ChartLine } from "./Charts";
+import { TimePicker } from "./TimePicker";
 import { Led } from "./ui";
 
 const SCENE_SIZE = [1280, 720] as const;
@@ -213,6 +213,13 @@ export function Stage({
   const shownRef = useRef<History | null>(null);
   shownRef.current = history;
   const panTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A shift-drag selection arrives in absolute seconds and zooms straight in.
+  const onSelect = (startSec: number, endSec: number) => {
+    const landed = clampWindow(startSec, endSec, Math.floor(Date.now() / 1000));
+    setRange(landed.end - landed.start);
+    setPinnedEnd(landed.live ? null : landed.end);
+  };
+
   const onPan = (startPct: number, endPct: number) => {
     if (panTimer.current) clearTimeout(panTimer.current);
     panTimer.current = setTimeout(() => {
@@ -262,41 +269,32 @@ export function Stage({
             {name === runningName ? <Led grade="ok" /> : null}
           </button>
         ))}
-        <div className="flex overflow-hidden rounded-md border border-line">
-          {RANGE_PRESETS.map((preset) => (
+        {/* Fixed on the right, so the legend growing on the left never moves
+            the time controls out from under the pointer. */}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {pinnedEnd !== null ? (
             <button
-              key={preset.label}
-              onClick={() => {
-                setRange(preset.seconds);
-                setPinnedEnd(null);
-              }}
-              className={
-                `cursor-pointer px-2 py-0.5 font-mono text-[10.5px] ` +
-                (range === preset.seconds && pinnedEnd === null
-                  ? "bg-blue/20 text-blue"
-                  : "text-muted hover:text-text")
-              }
+              onClick={() => setPinnedEnd(null)}
+              className="flex cursor-pointer items-center gap-1.5 rounded-md border border-warn/45 bg-warn/10 px-2 py-1 font-mono text-[10.5px] text-warn"
+              title="Viewing history — click to follow now again"
             >
-              {preset.label}
+              resume live
             </button>
-          ))}
+          ) : (
+            <span className="flex items-center gap-1.5 font-mono text-[10.5px] text-live">
+              <span className="size-[6px] animate-pulse rounded-full bg-live" />
+              live
+            </span>
+          )}
+          <TimePicker
+            range={range}
+            pinnedEnd={pinnedEnd}
+            onApply={(rangeSeconds, end) => {
+              setRange(rangeSeconds);
+              setPinnedEnd(end);
+            }}
+          />
         </div>
-        <span className="text-faint">drag charts to pan · wheel to zoom</span>
-        <div className="flex-1" />
-        {pinnedEnd !== null ? (
-          <button
-            onClick={() => setPinnedEnd(null)}
-            className="flex cursor-pointer items-center gap-1.5 rounded-md border border-warn/45 bg-warn/10 px-2 py-0.5 font-mono text-[10.5px] text-warn"
-            title="Viewing history — click to follow now again"
-          >
-            paused @ {fmtClock(pinnedEnd)} · resume live
-          </button>
-        ) : (
-          <span className="flex items-center gap-1.5 font-mono text-[10.5px] text-live">
-            <span className="size-[6px] animate-pulse rounded-full bg-live" />
-            live
-          </span>
-        )}
       </div>
       <div
         className={
@@ -389,6 +387,7 @@ export function Stage({
             lines={lines("perceive")}
             window={history}
             onPan={onPan}
+            onSelect={onSelect}
             format={(value) => `${Math.round(value)} ms`}
           />
         </Card>
@@ -401,6 +400,7 @@ export function Stage({
             lines={lines("resolve")}
             window={history}
             onPan={onPan}
+            onSelect={onSelect}
             format={(value) => `${Math.round(value)} ms`}
           />
         </Card>
@@ -417,6 +417,7 @@ export function Stage({
             lines={lines("score")}
             window={history}
             onPan={onPan}
+            onSelect={onSelect}
             format={(value) => value.toFixed(2)}
           />
         </Card>
@@ -429,6 +430,7 @@ export function Stage({
             lines={lines("cpm")}
             window={history}
             onPan={onPan}
+            onSelect={onSelect}
             format={(value) => `${value} /min`}
           />
         </Card>
