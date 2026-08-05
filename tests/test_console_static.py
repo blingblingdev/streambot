@@ -119,6 +119,36 @@ class StaticRouteTests(unittest.TestCase):
         self.assertTrue(headers["Content-Type"].startswith("application/json"))
 
 
+class AdoptedWorkerLogTests(unittest.TestCase):
+    def test_an_adopted_workers_log_is_still_readable(self) -> None:
+        # A restarted console adopts the running worker; the Logs tab must not
+        # go blank just because this console generation did not start it.
+        with TemporaryDirectory() as directory:
+            log_dir = Path(directory)
+            (log_dir / "worker.log").write_text(
+                "".join(f"line {n}\n" for n in range(40)), encoding="utf-8"
+            )
+            with mock.patch.object(server, "LOG_DIR", log_dir):
+                supervisor = server.WorkerSupervisor(log_dir, log_dir / "sock")
+                self.assertIsNone(supervisor._log_path)
+                tail = supervisor.recent_log(lines=5)
+        self.assertEqual(tail, [f"line {n}" for n in range(35, 40)])
+
+    def test_only_the_tail_of_a_large_log_is_read(self) -> None:
+        with TemporaryDirectory() as directory:
+            log_dir = Path(directory)
+            lines = [f"entry number {n:08d}" for n in range(4000)]
+            (log_dir / "worker.log").write_text(
+                "".join(line + "\n" for line in lines), encoding="utf-8"
+            )
+            with mock.patch.object(server, "LOG_DIR", log_dir):
+                supervisor = server.WorkerSupervisor(log_dir, log_dir / "sock")
+                tail = supervisor.recent_log(lines=12)
+        self.assertEqual(tail, lines[-12:])
+        self.assertTrue(all(line.startswith("entry") for line in tail),
+                        "a mid-file fragment leaked into the tail")
+
+
 class PostRoutingTests(unittest.TestCase):
     def test_post_routes_ignore_the_query_string_like_get_does(self) -> None:
         # do_POST used to compare the whole path, so `/api/jobs/start?x=1`

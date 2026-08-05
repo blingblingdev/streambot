@@ -206,10 +206,32 @@ class WorkerSupervisor:
         return None
 
     def recent_log(self, lines: int = 12) -> list[str]:
-        if self._log_path is None or not self._log_path.exists():
+        """The worker log's tail, whoever started the worker.
+
+        Every console generation appends to the same fixed file, so a console
+        that merely ADOPTED a running worker still has its log — the previous
+        behaviour of returning nothing for an adopted worker meant the Logs
+        tab went blank exactly when an operator had restarted the console,
+        which is when they are most likely to be looking.
+
+        Reads only the tail: this is called once a second per SSE client, and
+        the log grows for as long as the worker lives.
+        """
+
+        path = self._log_path or (LOG_DIR / "worker.log")
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - 16_384))
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
             return []
-        text = self._log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return text[-lines:]
+        tail = text.splitlines()
+        # The first line of a mid-file read is almost always a fragment.
+        if size > 16_384 and tail:
+            tail = tail[1:]
+        return tail[-lines:]
 
 
 class FlowLogReader:
