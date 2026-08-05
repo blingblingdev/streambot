@@ -21,8 +21,8 @@
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
     "Microsoft YaHei", system-ui, sans-serif;
-
-  --spacing-rail: 340px;
+  /* The rail's width is operator state (dragged, remembered), not a token —
+     see lib/rail.ts. */
 }
 
 @layer base {

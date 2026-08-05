@@ -50,28 +50,44 @@ Then open `http://127.0.0.1:8787/`. Options: `--port`, `--state-dir`
 ## What it does
 
 - **Start / Stop worker** — supervise one worker child; the control plane
-  starts with automation paused.
-- **Connection** — a telemetry readout: state, automation enable, frame age
-  (colour-graded), reconnect count, and the last error.
-- **What the worker sees** — the current scene id and the detected controls as
-  a readable list; the recommended control is marked, and clicking a row
-  dispatches it by id. A running job publishes what it detects over the
-  `report-scene` IPC command, so the overlay reflects whichever job is active.
-- **Jobs** — every `<jobs-dir>/*/job.json` with its running state and a
-  Start/Stop button. The running job's card carries a direct stop button and
-  macro session data (uptime, cycles, total clicks, clicks/min, mean
-  confidence, capture→detect and detect→click latency, recent errors) fed by
-  an incremental `flow-log.jsonl` reader, plus a color-graded scrolling
-  perceive/click event feed (DOM capped, auto-follow unless you scroll up).
+  starts with automation paused. Stream disconnect/reconnect are their own
+  buttons while a worker is reachable.
+- **Timeline** — the running job's activity as a timeline: every look and
+  click is a dot on a spine with the step drawn as its phases (transport,
+  classify, locate, click), proportionally, so "where did the time go" is
+  visible without reading numbers. Clicking a timed row opens a floating
+  breakdown with the milliseconds and what the step was about. Bounded, and
+  auto-follows unless you scroll up to read.
+- **Running job** — direct Stop and Settings buttons plus macro session data
+  (uptime, cycles, total clicks, clicks/min, mean confidence, capture→detect,
+  locate, detect→click latency, recent errors) fed by an incremental
+  `flow-log.jsonl` reader.
+- **Settings while it runs** — a job that declares a `config` block in its
+  `job.json` gets a dialog (and presets) editable from the console; a running
+  job adopts changes at its next poll, nothing restarts. See
+  `../../jobs/README.md`.
+- **Live frame** — the frame in the browser only, never written to disk (the
+  JPEG temp file is deleted immediately). The scene id, actionable tag and
+  cadence selector sit on the card; cadence is 1 second, 1 minute, or paused —
+  and paused still refreshes once a minute so the view never goes fully
+  stale. Detected controls overlay the frame; clicking a marker dispatches by
+  id. The stream's vitals (state, freshness, reconnects, control count) sit
+  under the picture.
+- **Charts** — capture→detect, locate-control, click confidence and
+  clicks/min over the session.
+- **Jobs drawer** — every `<jobs-dir>/*/job.json` with its running state,
+  Start/Stop, and Settings where declared.
+- **Logs** — two views on one tab: the system's turning points as the console
+  narrates them (stream drops, reconnects, IPC silences, worker adopted, job
+  lifecycle — derived by diffing status once a second, timestamped), and the
+  worker log's raw tail.
 - **Restart-safe** — closing the console never stops the worker or a running
   job: a restarted console re-adopts the worker through its IPC socket and
   jobs through a process scan that verifies the full command line before it
   will ever signal a pid. Stopping anything is always an explicit action.
-- **Live frame** — the frame in the browser only, never written to disk (the
-  JPEG temp file is deleted immediately). Cadence is selectable — 1 second, 1
-  minute, or paused — and paused still refreshes once a minute so the view never
-  goes fully stale. Detected controls overlay the frame.
-- **Logs** — the tail of the supervised worker's output, on its own tab.
+- **Fits the screen** — the rail is drag-resizable (double-click resets,
+  width remembered); below 820px the console stacks with the cards in one
+  scrolling column.
 
 ## Safety
 
