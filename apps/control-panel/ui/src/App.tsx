@@ -4,6 +4,12 @@ import { api, fetchOnce, isShotMode, useEventStream } from "./api";
 import type { FlowEvent, JobRow, StreamPayload } from "./types";
 import { fmtUptime, latencyGrade, scoreGrade } from "./lib/format";
 import { mergeEvents } from "./lib/timeline";
+import {
+  RAIL_DEFAULT,
+  clampRailWidth,
+  loadRailWidth,
+  storeRailWidth,
+} from "./lib/rail";
 import { Button, Cell, Led, Section } from "./components/ui";
 import { Timeline } from "./components/Timeline";
 import { Stage } from "./components/Stage";
@@ -49,6 +55,26 @@ export function App() {
   const [settingsFor, setSettingsFor] = useState<JobRow | null>(null);
   const [events, setEvents] = useState<FlowEvent[]>([]);
   const [feedJob, setFeedJob] = useState<string | null>(null);
+  const [railWidth, setRailWidth] = useState(loadRailWidth);
+
+  const dragRail = (down: React.PointerEvent) => {
+    down.preventDefault();
+    const from = down.clientX;
+    const start = railWidth;
+    // Text would otherwise get selected all over the page while dragging.
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    const move = (event: PointerEvent) =>
+      setRailWidth(clampRailWidth(start + event.clientX - from));
+    const up = (event: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      storeRailWidth(clampRailWidth(start + event.clientX - from));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+  };
 
   useEffect(() => {
     if (shot) fetchOnce().then(setOnce);
@@ -169,7 +195,10 @@ export function App() {
         <LogsView workerTail={status?.log_tail ?? []} />
       ) : (
         <div className="flex min-h-0 flex-1">
-          <aside className="flex w-rail shrink-0 flex-col overflow-hidden border-r border-line bg-panel">
+          <aside
+            className="flex shrink-0 flex-col overflow-hidden bg-panel"
+            style={{ width: railWidth }}
+          >
             <Section
               title="Running"
               className={running ? "" : "opacity-60"}
@@ -270,6 +299,16 @@ export function App() {
               <Timeline events={events} />
             </section>
           </aside>
+
+          <div
+            onPointerDown={dragRail}
+            onDoubleClick={() => {
+              setRailWidth(RAIL_DEFAULT);
+              storeRailWidth(RAIL_DEFAULT);
+            }}
+            title="Drag to resize · double-click to reset"
+            className="w-[5px] shrink-0 cursor-col-resize border-x border-transparent bg-line/60 transition-colors hover:bg-blue/60 active:bg-blue"
+          />
 
           <Stage status={status} jobName={running?.name ?? null} metrics={metrics} />
         </div>

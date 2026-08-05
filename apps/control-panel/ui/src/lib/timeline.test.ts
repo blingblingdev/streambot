@@ -101,6 +101,16 @@ describe("placePopover", () => {
   });
 });
 
+describe("rail width", () => {
+  test("clamps to its bounds and rejects nonsense", async () => {
+    const { clampRailWidth, RAIL_DEFAULT, RAIL_MAX, RAIL_MIN } = await import("./rail");
+    expect(clampRailWidth(400)).toBe(400);
+    expect(clampRailWidth(50)).toBe(RAIL_MIN);
+    expect(clampRailWidth(5000)).toBe(RAIL_MAX);
+    expect(clampRailWidth(Number.NaN)).toBe(RAIL_DEFAULT);
+  });
+});
+
 describe("formatters", () => {
   test("uptime reads in the largest useful unit", () => {
     expect(fmtUptime(null)).toBe("—");
