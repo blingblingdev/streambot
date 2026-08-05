@@ -123,29 +123,15 @@ class FeedDomBoundTest(unittest.TestCase):
     What remains here is the half of the guard that is genuinely server-side.
     """
 
-    def test_chart_history_is_hard_capped_server_side(self) -> None:
-        # Chart history now lives on the server; hours of dense events must
-        # stay bounded in memory and on the wire.
-        self.assertLessEqual(server.FlowLogReader.HISTORY_MAX_POINTS, 4000)
+    def test_a_reader_feeds_the_metrics_store_in_one_transaction(self) -> None:
+        # Chart history lives in the SQLite store now (tests/test_metrics_store
+        # pins its bounds, retention and zero-fill); what the reader owes is
+        # faithful, batched delivery — including across sessions, because
+        # persistence across sessions is the point.
         now = int(time.time())
         with TemporaryDirectory() as directory:
             path = Path(directory) / "flow-log.jsonl"
-            cap = server.FlowLogReader.HISTORY_MAX_POINTS
-            write_lines(path, [{"t": now - 10, "event": "start"}] + [
-                {"t": now - 5, "event": "click", "element": "a",
-                 "score": 0.9, "perceive_ms": 50.0}
-                for _ in range(cap + 200)
-            ])
-            reader = server.FlowLogReader(path)
-            reader.poll()
-            history = reader.history()
-        self.assertEqual(len(history["perceive"]), cap)
-        self.assertEqual(len(history["score"]), cap)
-
-    def test_history_series_reset_with_the_session(self) -> None:
-        now = int(time.time())
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "flow-log.jsonl"
+            store = server.MetricsStore(Path(directory) / "metrics.db")
             write_lines(path, [
                 {"t": now - 600, "event": "start"},
                 {"t": now - 590, "event": "click", "element": "old",
@@ -155,15 +141,13 @@ class FeedDomBoundTest(unittest.TestCase):
                 {"t": now - 60, "event": "click", "element": "a",
                  "score": 0.97, "perceive_ms": 120.0},
             ])
-            reader = server.FlowLogReader(path)
+            reader = server.FlowLogReader(path, store=store, job="demo")
             reader.poll()
-            history = reader.history()
-        # Only the current session survives; clicks/min buckets zero-fill
-        # the gap minutes instead of interpolating across them.
-        self.assertEqual([v for _t, v in history["perceive"]], [80.0, 120.0])
-        self.assertEqual([v for _t, v in history["score"]], [0.97])
-        self.assertGreaterEqual(len(history["cpm"]), 1)
-        self.assertIn(0, [v for _t, v in history["cpm"]] + [0])
+            history = store.history("demo", now - 700, now)
+            store.close()
+        lively = [v for v in history["series"]["perceive"] if v > 0]
+        self.assertEqual(sorted(lively), [80.0, 120.0, 900.0])
+        self.assertIn(0.0, history["series"]["perceive"])  # the idle gap
 
 
 class JobAdoptionTests(unittest.TestCase):

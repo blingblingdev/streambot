@@ -120,14 +120,24 @@ export interface JobRow {
   configurable: boolean;
 }
 
-export type Point = [number, number];
-
+/**
+ * A window of chart history on one grid: `series.*[i]` belongs to the bucket
+ * starting at `start + i*step` seconds. Complete and zero-filled — a bucket
+ * nobody looked in is 0, so the frontend can slide the window without ever
+ * meeting a hole.
+ */
 export interface History {
   ok: true;
-  perceive: Point[];
-  resolve: Point[];
-  score: Point[];
-  cpm: Point[];
+  start: number;
+  end: number;
+  step: number;
+  series: {
+    perceive: number[];
+    resolve: number[];
+    act: number[];
+    score: number[];
+    cpm: number[];
+  };
 }
 
 export type ConfigValue = string | number | boolean;

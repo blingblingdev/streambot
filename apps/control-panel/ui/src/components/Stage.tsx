@@ -20,6 +20,8 @@ import {
 } from "../lib/format";
 import { PHASE_COLORS } from "../lib/timeline";
 import { NARROW_QUERY, useMediaQuery } from "../lib/useMediaQuery";
+import { RANGE_PRESETS, panWindow } from "../lib/timerange";
+import { fmtClock } from "../lib/format";
 import { Chart } from "./Charts";
 import { Led } from "./ui";
 
@@ -169,6 +171,10 @@ export function Stage({
 }) {
   const [rate, setRate] = useState(60_000);
   const [history, setHistory] = useState<History | null>(null);
+  // The chart window: how much history, and whether it follows now (live) or
+  // stays where the operator dragged it (pinned).
+  const [range, setRange] = useState(3600);
+  const [pinnedEnd, setPinnedEnd] = useState<number | null>(null);
   const scene = status?.scene;
 
   useEffect(() => {
@@ -176,18 +182,39 @@ export function Stage({
       setHistory(null);
       return;
     }
-    let live = true;
+    let alive = true;
     const load = async () => {
-      const result = await api.history(jobName);
-      if (live && result.ok === true) setHistory(result);
+      const result = await api.history(jobName, range, pinnedEnd ?? undefined);
+      if (alive && result.ok === true) setHistory(result);
     };
     load();
+    // Live slides with now; a pinned window is history and history holds still.
+    if (pinnedEnd !== null) return () => void (alive = false);
     const timer = setInterval(load, 3000);
     return () => {
-      live = false;
+      alive = false;
       clearInterval(timer);
     };
-  }, [jobName]);
+  }, [jobName, range, pinnedEnd]);
+
+  // A drag lands as percentages of the shown window; map it back to absolute
+  // time and ask the server for that window. Debounced, because a drag is a
+  // stream of gestures and only where it settles matters.
+  const shownRef = useRef<History | null>(null);
+  shownRef.current = history;
+  const panTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onPan = (startPct: number, endPct: number) => {
+    if (panTimer.current) clearTimeout(panTimer.current);
+    panTimer.current = setTimeout(() => {
+      const shown = shownRef.current;
+      if (!shown) return;
+      if (Math.abs(startPct) < 0.5 && Math.abs(endPct - 100) < 0.5) return;
+      const now = Math.floor(Date.now() / 1000);
+      const landed = panWindow(shown.start, shown.end, startPct, endPct, now);
+      setRange(landed.end - landed.start);
+      setPinnedEnd(landed.live ? null : landed.end);
+    }, 350);
+  };
 
   const empty = useMemo(() => [], []);
   const narrow = useMediaQuery(NARROW_QUERY);
@@ -198,6 +225,44 @@ export function Stage({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5 text-[11px]">
+        <span className="tracking-wide text-faint uppercase">History</span>
+        <div className="flex overflow-hidden rounded-md border border-line">
+          {RANGE_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              onClick={() => {
+                setRange(preset.seconds);
+                setPinnedEnd(null);
+              }}
+              className={
+                `cursor-pointer px-2 py-0.5 font-mono text-[10.5px] ` +
+                (range === preset.seconds && pinnedEnd === null
+                  ? "bg-blue/20 text-blue"
+                  : "text-muted hover:text-text")
+              }
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+        <span className="text-faint">drag charts to pan · wheel to zoom</span>
+        <div className="flex-1" />
+        {pinnedEnd !== null ? (
+          <button
+            onClick={() => setPinnedEnd(null)}
+            className="flex cursor-pointer items-center gap-1.5 rounded-md border border-warn/45 bg-warn/10 px-2 py-0.5 font-mono text-[10.5px] text-warn"
+            title="Viewing history — click to follow now again"
+          >
+            paused @ {fmtClock(pinnedEnd)} · resume live
+          </button>
+        ) : (
+          <span className="flex items-center gap-1.5 font-mono text-[10.5px] text-live">
+            <span className="size-[6px] animate-pulse rounded-full bg-live" />
+            live
+          </span>
+        )}
+      </div>
       <div
         className={
           `grid min-h-0 flex-1 gap-2.5 p-2.5 ` +
@@ -286,7 +351,9 @@ export function Stage({
           grade={latencyGrade(metrics?.perceive_ms, 300, 600)}
         >
           <Chart
-            points={history?.perceive ?? empty}
+            values={history?.series.perceive ?? empty}
+            window={history}
+            onPan={onPan}
             color={PHASE_COLORS.cl}
             format={(value) => `${Math.round(value)} ms`}
           />
@@ -297,7 +364,9 @@ export function Stage({
           grade={latencyGrade(metrics?.resolve_ms, 150, 400)}
         >
           <Chart
-            points={history?.resolve ?? empty}
+            values={history?.series.resolve ?? empty}
+            window={history}
+            onPan={onPan}
             color={PHASE_COLORS.lo}
             format={(value) => `${Math.round(value)} ms`}
           />
@@ -312,7 +381,9 @@ export function Stage({
           grade={scoreGrade(metrics?.last_score ?? metrics?.mean_score)}
         >
           <Chart
-            points={history?.score ?? empty}
+            values={history?.series.score ?? empty}
+            window={history}
+            onPan={onPan}
             color="#e3b341"
             format={(value) => value.toFixed(2)}
           />
@@ -323,7 +394,9 @@ export function Stage({
           grade="ok"
         >
           <Chart
-            points={history?.cpm ?? empty}
+            values={history?.series.cpm ?? empty}
+            window={history}
+            onPan={onPan}
             color="#4c9aff"
             format={(value) => `${value} /min`}
           />

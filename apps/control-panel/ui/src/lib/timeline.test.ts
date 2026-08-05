@@ -101,6 +101,41 @@ describe("placePopover", () => {
   });
 });
 
+describe("panWindow", () => {
+  test("a drag left lands on the earlier window it points at", async () => {
+    const { panWindow } = await import("./timerange");
+    const now = 100_000;
+    // Shown 90000..93600 (1h); dragged half a window back.
+    const landed = panWindow(90_000, 93_600, -50, 50, now);
+    expect(landed).toEqual({ start: 88_200, end: 91_800, live: false });
+  });
+
+  test("a wheel zoom-in narrows onto the middle", async () => {
+    const { panWindow } = await import("./timerange");
+    const landed = panWindow(90_000, 93_600, 25, 75, 100_000);
+    expect(landed.end - landed.start).toBe(1800);
+    expect(landed.live).toBe(false);
+  });
+
+  test("panning into the future clamps to now and reads as live", async () => {
+    const { panWindow } = await import("./timerange");
+    const now = 100_000;
+    const landed = panWindow(now - 3600, now, 50, 150, now);
+    expect(landed.end).toBe(now);
+    expect(landed.live).toBe(true);
+    expect(landed.end - landed.start).toBe(3600);
+  });
+
+  test("cannot pan past the retention horizon or below a minute", async () => {
+    const { panWindow, MAX_RANGE_SECONDS } = await import("./timerange");
+    const now = 100_000_000;
+    const ancient = panWindow(now - 3600, now, -1e9, -1e9 + 100, now);
+    expect(ancient.start).toBeGreaterThanOrEqual(now - MAX_RANGE_SECONDS);
+    const tiny = panWindow(now - 3600, now - 1800, 50, 50.001, now);
+    expect(tiny.end - tiny.start).toBeGreaterThanOrEqual(60);
+  });
+});
+
 describe("rail width", () => {
   test("clamps to its bounds and rejects nonsense", async () => {
     const { clampRailWidth, RAIL_DEFAULT, RAIL_MAX, RAIL_MIN } = await import("./rail");

@@ -74,7 +74,12 @@ Then open `http://127.0.0.1:8787/`. Options: `--port`, `--state-dir`
   id. The stream's vitals (state, freshness, reconnects, control count) sit
   under the picture.
 - **Charts** — capture→detect, locate-control, click confidence and
-  clicks/min over the session.
+  clicks/min, persisted in a single SQLite file (`.state/control-panel/`
+  `metrics.db`) for thirty days. Preset windows from 15 minutes to 30 days;
+  the live view slides with now; dragging pans through history (all charts
+  together, wheel zooms) and holds still until you resume live. Buckets
+  nobody looked in read as zero — a gap is data. A cold console rebuilds the
+  store from the flow logs it finds.
 - **Jobs drawer** — every `<jobs-dir>/*/job.json` with its running state,
   Start/Stop, and Settings where declared.
 - **Logs** — two views on one tab: the system's turning points as the console
