@@ -37,7 +37,13 @@ export interface ChartWindow {
   step: number;
 }
 
-function option(color: string, format: (value: number) => string) {
+export interface ChartLine {
+  name: string;
+  color: string;
+  values: number[];
+}
+
+function option(format: (value: number) => string) {
   return {
     animation: false,
     grid: { left: 44, right: 12, top: 10, bottom: 22 },
@@ -70,29 +76,19 @@ function option(color: string, format: (value: number) => string) {
         moveOnMouseWheel: false,
       },
     ],
-    series: [
-      {
-        type: "line" as const,
-        showSymbol: false,
-        lineStyle: { color, width: 1.6 },
-        itemStyle: { color },
-        areaStyle: { color, opacity: 0.08 },
-        data: [] as [number, number][],
-      },
-    ],
+    series: [] as object[],
   };
 }
 
 export function Chart({
-  values,
+  lines,
   window: win,
-  color,
   format,
   onPan,
 }: {
-  values: number[];
+  /** One line per job, all on the shared window grid. */
+  lines: ChartLine[];
   window: ChartWindow | null;
-  color: string;
   format: (value: number) => string;
   /** A drag/zoom gesture, as percentages of the shown window. */
   onPan?: (startPct: number, endPct: number) => void;
@@ -105,7 +101,7 @@ export function Chart({
   useEffect(() => {
     if (!host.current) return;
     const instance = echarts.init(host.current);
-    instance.setOption(option(color, format));
+    instance.setOption(option(format));
     // One group, so dragging any chart pans all of them together.
     instance.group = GROUP;
     echarts.connect(GROUP);
@@ -129,21 +125,28 @@ export function Chart({
 
   useEffect(() => {
     if (!chart.current || !win) return;
-    chart.current.setOption({
-      xAxis: { min: win.start * 1000, max: win.end * 1000 },
-      // The fetched data covers exactly the axis again; any leftover gesture
-      // offset would double-apply it.
-      dataZoom: [{ start: 0, end: 100 }],
-      series: [
-        {
-          data: values.map((value, index) => [
+    chart.current.setOption(
+      {
+        xAxis: { min: win.start * 1000, max: win.end * 1000 },
+        // The fetched data covers exactly the axis again; any leftover
+        // gesture offset would double-apply it.
+        dataZoom: [{ start: 0, end: 100 }],
+        series: lines.map((line) => ({
+          type: "line" as const,
+          name: line.name,
+          showSymbol: false,
+          lineStyle: { color: line.color, width: 1.6 },
+          itemStyle: { color: line.color },
+          areaStyle: lines.length === 1 ? { color: line.color, opacity: 0.08 } : undefined,
+          data: line.values.map((value, index) => [
             (win.start + index * win.step) * 1000,
             value,
           ]),
-        },
-      ],
-    });
-  }, [values, win]);
+        })),
+      },
+      { replaceMerge: ["series"] }, // a job leaving the window takes its line with it
+    );
+  }, [lines, win]);
 
   return <div ref={host} className="absolute inset-0" />;
 }

@@ -54,53 +54,61 @@ class MetricsStoreTests(unittest.TestCase):
         # complete and the silence is zeros.
         start = NOW - 600
         self.ingest("a", [look(start + 5)])
-        history = self.store.history("a", start, NOW)
-        series = history["series"]["perceive"]
+        history = self.store.history(start, NOW)
+        series = history["jobs"]["a"]["perceive"]
         expected = (history["end"] - history["start"]) // history["step"]
         self.assertEqual(len(series), expected)
         # The one sample sits near the head; everything after it is zero.
         self.assertTrue(any(value > 0 for value in series[:6]))
         self.assertEqual(sum(1 for value in series if value > 0), 1)
         self.assertEqual(series[-1], 0.0)
-        self.assertEqual(len(history["series"]["cpm"]), expected)
+        self.assertEqual(len(history["jobs"]["a"]["cpm"]), expected)
 
-    def test_the_grid_is_aligned_and_described(self) -> None:
-        history = self.store.history("a", NOW - 3600, NOW)
+    def test_every_present_jobs_series_share_the_grid(self) -> None:
+        start = NOW - 600
+        self.ingest("a", [look(start + 5)])
+        self.ingest("b", [click(start + 200)])
+        history = self.store.history(start, NOW)
         self.assertEqual(history["start"] % history["step"], 0)
-        for name in ("perceive", "resolve", "act", "score", "cpm"):
-            self.assertEqual(
-                len(history["series"][name]),
-                (history["end"] - history["start"]) // history["step"],
-            )
+        expected = (history["end"] - history["start"]) // history["step"]
+        for job in ("a", "b"):
+            for name in ("perceive", "resolve", "act", "score", "cpm"):
+                self.assertEqual(len(history["jobs"][job][name]), expected)
+
+    def test_jobs_without_data_in_the_window_are_absent(self) -> None:
+        self.ingest("old", [look(NOW - 3 * 24 * 3600)])
+        self.ingest("live", [look(NOW - 30)])
+        history = self.store.history(NOW - 600, NOW)
+        self.assertEqual(sorted(history["jobs"]), ["live"])
 
     def test_values_average_within_a_bucket(self) -> None:
         start = ((NOW - 600) // 10) * 10
         self.ingest("a", [look(start, perceive=40.0), look(start + 1, perceive=80.0)])
-        history = self.store.history("a", start, start + 60)
-        self.assertEqual(history["series"]["perceive"][0], 60.0)
+        history = self.store.history(start, start + 60)
+        self.assertEqual(history["jobs"]["a"]["perceive"][0], 60.0)
 
     def test_clicks_become_a_per_minute_rate(self) -> None:
         start = ((NOW - 300) // 60) * 60
         self.ingest("a", [click(start + i) for i in range(0, 30, 10)])  # 3 clicks
-        history = self.store.history("a", start, start + 60)
+        history = self.store.history(start, start + 60)
         step = history["step"]
-        total = sum(v * step / 60.0 for v in history["series"]["cpm"])
+        total = sum(v * step / 60.0 for v in history["jobs"]["a"]["cpm"])
         self.assertAlmostEqual(total, 3.0, places=3)
 
     def test_reingesting_the_same_log_does_not_double_anything(self) -> None:
         start = NOW - 600
         events = [look(start + i * 2) for i in range(30)] + [click(start + 40)]
         self.ingest("a", events)
-        before = self.store.history("a", start, NOW)
+        before = self.store.history(start, NOW)
         self.ingest("a", events)  # a cold console re-reads the whole file
-        after = self.store.history("a", start, NOW)
-        self.assertEqual(before["series"], after["series"])
+        after = self.store.history(start, NOW)
+        self.assertEqual(before["jobs"], after["jobs"])
 
     def test_jobs_do_not_bleed_into_each_other(self) -> None:
         start = NOW - 600
         self.ingest("a", [look(start + 5, perceive=50.0)])
         self.ingest("b", [look(start + 5, perceive=500.0)])
-        a = self.store.history("a", start, NOW)["series"]["perceive"]
+        a = self.store.history(start, NOW)["jobs"]["a"]["perceive"]
         self.assertTrue(all(v <= 50.0 for v in a))
 
     def test_history_survives_reopening_the_file(self) -> None:
@@ -110,7 +118,7 @@ class MetricsStoreTests(unittest.TestCase):
         self.store.close()
         reopened = server.MetricsStore(path)
         try:
-            series = reopened.history("a", start, NOW)["series"]["perceive"]
+            series = reopened.history(start, NOW)["jobs"]["a"]["perceive"]
             self.assertTrue(any(value > 0 for value in series))
         finally:
             reopened.close()
@@ -131,15 +139,16 @@ class MetricsStoreTests(unittest.TestCase):
         # The stopped-job case: job A ran weeks ago; the store's rollup has
         # long since advanced past those buckets (driven by job B's live
         # queries); only then is A's old log ingested for the first time. A
-        # wide window on A must still show it.
+        # wide window must still show it.
         self.ingest("b", [look(NOW - 60)])
-        self.store.history("b", NOW - 7 * 24 * 3600, NOW)  # advances the watermark
+        self.store.history(NOW - 7 * 24 * 3600, NOW)  # advances the watermark
         week_ago = NOW - 7 * 24 * 3600 + 600
         self.ingest("a", [look(week_ago + i * 2, perceive=75.0) for i in range(100)])
-        wide = self.store.history("a", NOW - 14 * 24 * 3600, NOW)
+        wide = self.store.history(NOW - 14 * 24 * 3600, NOW)
         self.assertGreater(wide["step"], 60)  # wide enough to use the rollup
+        self.assertIn("a", wide["jobs"])
         self.assertTrue(
-            any(v > 0 for v in wide["series"]["perceive"]),
+            any(v > 0 for v in wide["jobs"]["a"]["perceive"]),
             "backfilled history vanished behind the rollup watermark",
         )
 
@@ -157,10 +166,10 @@ class MetricsStoreTests(unittest.TestCase):
             )
         self.store.write(rows)
         t0 = time.perf_counter()
-        history = self.store.history("a", NOW - 30 * day, NOW)
+        history = self.store.history(NOW - 30 * day, NOW)
         first_ms = (time.perf_counter() - t0) * 1000
         t0 = time.perf_counter()
-        self.store.history("a", NOW - 30 * day, NOW)
+        self.store.history(NOW - 30 * day, NOW)
         warm_ms = (time.perf_counter() - t0) * 1000
         buckets = (history["end"] - history["start"]) // history["step"]
         self.assertLessEqual(buckets, server.MetricsStore.TARGET_BUCKETS * 2)
@@ -173,7 +182,7 @@ class MetricsStoreTests(unittest.TestCase):
         rows = [("a", "perceive", NOW - 3600 + i * 2, 60.0) for i in range(1800)]
         self.store.write(rows)
         t0 = time.perf_counter()
-        history = self.store.history("a", NOW - 3600, NOW)
+        history = self.store.history(NOW - 3600, NOW)
         ms = (time.perf_counter() - t0) * 1000
         self.assertLess(ms, 100, f"1h query took {ms:.0f}ms")
         self.assertLess(history["step"], server.MetricsStore.ROLLUP_STEP)

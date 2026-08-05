@@ -39,10 +39,9 @@ async function get<T>(path: string): Promise<ApiResult<T>> {
 export const api = {
   status: () => get<Status>("/api/status"),
   jobs: () => get<{ ok: true; jobs: JobRow[] }>("/api/jobs"),
-  history: (name: string, rangeSeconds: number, end?: number) =>
+  history: (rangeSeconds: number, end?: number) =>
     get<History>(
-      `/api/jobs/history?name=${encodeURIComponent(name)}&range=${rangeSeconds}` +
-        (end ? `&end=${end}` : ""),
+      `/api/jobs/history?range=${rangeSeconds}` + (end ? `&end=${end}` : ""),
     ),
   jobConfig: (name: string) =>
     get<JobConfig>(`/api/jobs/config?name=${encodeURIComponent(name)}`),

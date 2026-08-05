@@ -120,24 +120,27 @@ export interface JobRow {
   configurable: boolean;
 }
 
+export interface JobSeries {
+  perceive: number[];
+  resolve: number[];
+  act: number[];
+  score: number[];
+  cpm: number[];
+}
+
 /**
- * A window of chart history on one grid: `series.*[i]` belongs to the bucket
- * starting at `start + i*step` seconds. Complete and zero-filled — a bucket
- * nobody looked in is 0, so the frontend can slide the window without ever
- * meeting a hole.
+ * A window of chart history on one grid, for every job that has data in it:
+ * `jobs[name].*[i]` belongs to the bucket starting at `start + i*step`
+ * seconds. Complete and zero-filled — a bucket nobody looked in is 0, so the
+ * frontend can slide the window without ever meeting a hole, and every job's
+ * line shares the same axis.
  */
 export interface History {
   ok: true;
   start: number;
   end: number;
   step: number;
-  series: {
-    perceive: number[];
-    resolve: number[];
-    act: number[];
-    score: number[];
-    cpm: number[];
-  };
+  jobs: Record<string, JobSeries>;
 }
 
 export type ConfigValue = string | number | boolean;

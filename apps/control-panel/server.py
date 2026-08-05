@@ -586,13 +586,15 @@ class MetricsStore:
                 return step
         return self.STEPS[-1]
 
-    def history(self, job: str, start: int, end: int) -> dict[str, Any]:
-        """Every chart series over [start, end), zero-filled onto one grid.
+    def history(self, start: int, end: int) -> dict[str, Any]:
+        """Every job's chart series over [start, end), on one zero-filled grid.
 
-        A bucket nobody looked in reads as zero, not as absence — the line
-        drops to the floor instead of interpolating across an idle hour, and
-        the grid is complete so the frontend can slide the window without
-        ever meeting a hole.
+        All jobs together, deliberately: what ran when, side by side, is the
+        question a shared timeline answers — the charts draw one line per job
+        rather than making the operator pick. Only jobs with at least one
+        sample in the window appear; each present job's series are complete
+        and zero-filled, so a bucket nobody looked in reads as zero and the
+        window can slide without ever meeting a hole.
         """
 
         span = max(1, end - start)
@@ -602,24 +604,19 @@ class MetricsStore:
         first = (start // step) * step
         end = ((end + step - 1) // step) * step
         buckets = range(first, end, step)
-        counts_of = {
-            series: dict[int, tuple[float, int]]() for series in self.TIMING_SERIES
-        }
-        clicks: dict[int, float] = {}
 
         with self._lock:
             use_rollup = step >= self.ROLLUP_STEP
             if use_rollup:
                 self._advance_rollup_locked()
-                cursor = self._db.execute(
+                rows = self._db.execute(
                     """
-                    select series, (bucket / ?) * ?, sum(total), sum(n)
-                    from rollup where job=? and bucket >= ? and bucket < ?
-                    group by series, 2
+                    select job, series, (bucket / ?) * ?, sum(total), sum(n)
+                    from rollup where bucket >= ? and bucket < ?
+                    group by job, series, 3
                     """,
-                    (step, step, job, first, end),
-                )
-                rows = cursor.fetchall()
+                    (step, step, first, end),
+                ).fetchall()
                 # The tail past the watermark only exists in raw.
                 mark = self._db.execute(
                     "select value from meta where key='rollup_watermark'"
@@ -628,56 +625,68 @@ class MetricsStore:
                 if tail_from < end:
                     rows += self._db.execute(
                         """
-                        select series, (t / ?) * ?, sum(value), count(*)
-                        from points where job=? and t >= ? and t < ?
-                        group by series, 2
+                        select job, series, (t / ?) * ?, sum(value), count(*)
+                        from points where t >= ? and t < ?
+                        group by job, series, 3
                         """,
-                        (step, step, job, max(first, tail_from), end),
+                        (step, step, max(first, tail_from), end),
                     ).fetchall()
             else:
                 rows = self._db.execute(
                     """
-                    select series, (t / ?) * ?, sum(value), count(*)
-                    from points where job=? and t >= ? and t < ?
-                    group by series, 2
+                    select job, series, (t / ?) * ?, sum(value), count(*)
+                    from points where t >= ? and t < ?
+                    group by job, series, 3
                     """,
-                    (step, step, job, first, end),
+                    (step, step, first, end),
                 ).fetchall()
 
-        for series, bucket, total, n in rows:
+        timings: dict[str, dict[str, dict[int, tuple[float, int]]]] = {}
+        clicks: dict[str, dict[int, float]] = {}
+        for job, series, bucket, total, n in rows:
             bucket = int(bucket)
             if series == "click":
-                clicks[bucket] = clicks.get(bucket, 0.0) + float(total)
-            elif series in counts_of:
-                held = counts_of[series]
+                held = clicks.setdefault(job, {})
+                held[bucket] = held.get(bucket, 0.0) + float(total)
+            elif series in self.TIMING_SERIES:
+                held = timings.setdefault(job, {}).setdefault(series, {})
                 if bucket in held:
                     prior_total, prior_n = held[bucket]
                     held[bucket] = (prior_total + float(total), prior_n + int(n))
                 else:
                     held[bucket] = (float(total), int(n))
 
-        def averaged(series: str) -> list[float]:
-            held = counts_of[series]
-            return [
-                round(held[b][0] / held[b][1], 2) if b in held and held[b][1] else 0.0
-                for b in buckets
-            ]
-
         per_minute = 60.0 / step
-        return {
-            "ok": True,
-            "start": first,
-            "end": end,
-            "step": step,
-            "series": {
+        jobs_payload: dict[str, dict[str, list[float]]] = {}
+        for job in sorted(set(timings) | set(clicks)):
+            series_of = timings.get(job, {})
+            job_clicks = clicks.get(job, {})
+
+            def averaged(series: str) -> list[float]:
+                held = series_of.get(series, {})
+                return [
+                    round(held[b][0] / held[b][1], 2)
+                    if b in held and held[b][1]
+                    else 0.0
+                    for b in buckets
+                ]
+
+            jobs_payload[job] = {
                 "perceive": averaged("perceive"),
                 "resolve": averaged("resolve"),
                 "act": averaged("act"),
                 "score": averaged("score"),
                 "cpm": [
-                    round(clicks.get(b, 0.0) * per_minute, 2) for b in buckets
+                    round(job_clicks.get(b, 0.0) * per_minute, 2) for b in buckets
                 ],
-            },
+            }
+
+        return {
+            "ok": True,
+            "start": first,
+            "end": end,
+            "step": step,
+            "jobs": jobs_payload,
         }
 
 
@@ -913,22 +922,22 @@ class JobSupervisor:
         return reader
 
     def history(
-        self, name: str, range_seconds: int | None = None, end: int | None = None
+        self, range_seconds: int | None = None, end: int | None = None
     ) -> dict[str, Any]:
-        """Chart series for one job over an arbitrary window, zero-filled.
+        """Every job's chart series over an arbitrary window, zero-filled.
 
         `end` omitted means "up to now" — the live, sliding view. A concrete
         `end` is a window the operator has panned to, which stays put.
         """
 
-        if name not in self.registry():
-            return {"ok": False, "error": "UnknownJob"}
         span = min(max(int(range_seconds or 3600), 60), MetricsStore.RETENTION_SECONDS)
         upto = int(end) if end else int(time.time())
         with self._lock:
-            # Ingest anything the log has gained before answering from the db.
-            self._flow_reader(name).poll()
-        return self.metrics.history(name, upto - span, upto)
+            # Ingest anything any log has gained before answering from the db.
+            # Incremental after the first read, so this is cheap per tick.
+            for name in self.registry():
+                self._flow_reader(name).poll()
+        return self.metrics.history(upto - span, upto)
 
     def status(self) -> list[dict[str, Any]]:
         rows = []
@@ -1399,7 +1408,6 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs, urlparse
 
             query = parse_qs(urlparse(self.path).query)
-            name = (query.get("name") or [""])[0]
 
             def integer(key: str) -> int | None:
                 raw = (query.get(key) or [""])[0]
@@ -1409,7 +1417,7 @@ class Handler(BaseHTTPRequestHandler):
                     return None
 
             self._send_json(
-                self.console.jobs.history(name, integer("range"), integer("end"))
+                self.console.jobs.history(integer("range"), integer("end"))
             )
             return
         if route == "/api/jobs/config":

@@ -7,7 +7,7 @@
  * stretched.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api } from "../api";
 import type { History, JobMetrics, SceneControl, Status } from "../types";
@@ -18,11 +18,10 @@ import {
   scoreGrade,
   type Grade,
 } from "../lib/format";
-import { PHASE_COLORS } from "../lib/timeline";
 import { NARROW_QUERY, useMediaQuery } from "../lib/useMediaQuery";
-import { RANGE_PRESETS, panWindow } from "../lib/timerange";
+import { RANGE_PRESETS, jobColor, panWindow } from "../lib/timerange";
 import { fmtClock } from "../lib/format";
-import { Chart } from "./Charts";
+import { Chart, type ChartLine } from "./Charts";
 import { Led } from "./ui";
 
 const SCENE_SIZE = [1280, 720] as const;
@@ -177,24 +176,15 @@ export function Stage({
   // stays where the operator dragged it (pinned).
   const [range, setRange] = useState(3600);
   const [pinnedEnd, setPinnedEnd] = useState<number | null>(null);
-  // Whose history. Follows the running job, but STAYS when it stops — the
-  // store keeps thirty days precisely so that a stopped job's charts do not
-  // vanish — and any job can be chosen by hand.
-  const [chosen, setChosen] = useState<string | null>(null);
-  useEffect(() => {
-    if (runningName) setChosen(runningName);
-  }, [runningName]);
-  const jobName = chosen ?? runningName ?? jobNames[0] ?? null;
+  // Every job with data in the window draws as its own line; a chip in the
+  // History bar hides one when it is in the way.
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
   const scene = status?.scene;
 
   useEffect(() => {
-    if (!jobName) {
-      setHistory(null);
-      return;
-    }
     let alive = true;
     const load = async () => {
-      const result = await api.history(jobName, range, pinnedEnd ?? undefined);
+      const result = await api.history(range, pinnedEnd ?? undefined);
       if (alive && result.ok === true) setHistory(result);
     };
     load();
@@ -205,7 +195,17 @@ export function Stage({
       alive = false;
       clearInterval(timer);
     };
-  }, [jobName, range, pinnedEnd]);
+  }, [range, pinnedEnd]);
+
+  const present = Object.keys(history?.jobs ?? {}).sort();
+  const lines = (metric: keyof import("../types").JobSeries): ChartLine[] =>
+    present
+      .filter((name) => !hidden.has(name))
+      .map((name) => ({
+        name,
+        color: jobColor(name, jobNames),
+        values: history?.jobs[name]?.[metric] ?? [],
+      }));
 
   // A drag lands as percentages of the shown window; map it back to absolute
   // time and ask the server for that window. Debounced, because a drag is a
@@ -226,7 +226,6 @@ export function Stage({
     }, 350);
   };
 
-  const empty = useMemo(() => [], []);
   const narrow = useMediaQuery(NARROW_QUERY);
   const cards = 5;
   const columns = narrow ? 1 : cards <= 2 ? cards : Math.ceil(Math.sqrt(cards));
@@ -237,20 +236,32 @@ export function Stage({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-1.5 text-[11px]">
         <span className="tracking-wide text-faint uppercase">History</span>
-        {jobNames.length > 1 ? (
-          <select
-            value={jobName ?? ""}
-            onChange={(event) => setChosen(event.target.value)}
-            className="max-w-[180px] rounded-md border border-line bg-panel2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted"
+        {present.map((name) => (
+          <button
+            key={name}
+            onClick={() =>
+              setHidden((held) => {
+                const next = new Set(held);
+                if (next.has(name)) next.delete(name);
+                else next.add(name);
+                return next;
+              })
+            }
+            title={hidden.has(name) ? "Show this job" : "Hide this job"}
+            className={
+              `flex cursor-pointer items-center gap-1.5 rounded-full border border-line ` +
+              `px-2 py-0.5 font-mono text-[10px] ` +
+              (hidden.has(name) ? "text-faint opacity-50" : "text-muted")
+            }
           >
-            {jobNames.map((name) => (
-              <option key={name} value={name}>
-                {name}
-                {name === runningName ? " ●" : ""}
-              </option>
-            ))}
-          </select>
-        ) : null}
+            <span
+              className="size-[7px] rounded-full"
+              style={{ background: jobColor(name, jobNames) }}
+            />
+            {name}
+            {name === runningName ? <Led grade="ok" /> : null}
+          </button>
+        ))}
         <div className="flex overflow-hidden rounded-md border border-line">
           {RANGE_PRESETS.map((preset) => (
             <button
@@ -375,10 +386,9 @@ export function Stage({
           grade={latencyGrade(metrics?.perceive_ms, 300, 600)}
         >
           <Chart
-            values={history?.series.perceive ?? empty}
+            lines={lines("perceive")}
             window={history}
             onPan={onPan}
-            color={PHASE_COLORS.cl}
             format={(value) => `${Math.round(value)} ms`}
           />
         </Card>
@@ -388,10 +398,9 @@ export function Stage({
           grade={latencyGrade(metrics?.resolve_ms, 150, 400)}
         >
           <Chart
-            values={history?.series.resolve ?? empty}
+            lines={lines("resolve")}
             window={history}
             onPan={onPan}
-            color={PHASE_COLORS.lo}
             format={(value) => `${Math.round(value)} ms`}
           />
         </Card>
@@ -405,10 +414,9 @@ export function Stage({
           grade={scoreGrade(metrics?.last_score ?? metrics?.mean_score)}
         >
           <Chart
-            values={history?.series.score ?? empty}
+            lines={lines("score")}
             window={history}
             onPan={onPan}
-            color="#e3b341"
             format={(value) => value.toFixed(2)}
           />
         </Card>
@@ -418,10 +426,9 @@ export function Stage({
           grade="ok"
         >
           <Chart
-            values={history?.series.cpm ?? empty}
+            lines={lines("cpm")}
             window={history}
             onPan={onPan}
-            color="#4c9aff"
             format={(value) => `${value} /min`}
           />
         </Card>

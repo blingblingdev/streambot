@@ -20,6 +20,30 @@ export const RANGE_PRESETS: RangePreset[] = [
 export const MAX_RANGE_SECONDS = 30 * 24 * 3600;
 
 /**
+ * One colour per job, stable across requests: assigned from the full job
+ * list (alphabetical, which the registry already is), not from whichever
+ * jobs happen to have data in the current window — so a job keeps its
+ * colour when the window moves.
+ */
+export const JOB_COLORS = [
+  "#2dd4bf",
+  "#4c9aff",
+  "#a78bfa",
+  "#e3b341",
+  "#f0553f",
+  "#3fb950",
+  "#ff7eb6",
+  "#7ee3fd",
+];
+
+export function jobColor(name: string, allJobs: string[]): string {
+  const index = allJobs.indexOf(name);
+  return JOB_COLORS[
+    (index >= 0 ? index : allJobs.length) % JOB_COLORS.length
+  ]!;
+}
+
+/**
  * Where a pan/zoom gesture lands, in absolute seconds.
  *
  * The chart reports the gesture as percentages of the window it was showing;

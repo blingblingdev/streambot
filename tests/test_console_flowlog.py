@@ -143,11 +143,12 @@ class FeedDomBoundTest(unittest.TestCase):
             ])
             reader = server.FlowLogReader(path, store=store, job="demo")
             reader.poll()
-            history = store.history("demo", now - 700, now)
+            history = store.history(now - 700, now)
             store.close()
-        lively = [v for v in history["series"]["perceive"] if v > 0]
+        perceive = history["jobs"]["demo"]["perceive"]
+        lively = [v for v in perceive if v > 0]
         self.assertEqual(sorted(lively), [80.0, 120.0, 900.0])
-        self.assertIn(0.0, history["series"]["perceive"])  # the idle gap
+        self.assertIn(0.0, perceive)  # the idle gap
 
 
 class JobAdoptionTests(unittest.TestCase):
