@@ -579,21 +579,42 @@ function resetFeed(){
   $("feed").innerHTML = '<div class="empty">Perceive and click events scroll here once a job is running.</div>';
 }
 
+/* How long it took to work out WHERE to click. Shown on every row that has
+   it, because during a long wait these rows are the only sign of life. */
+function locateMs(e){
+  if (e.resolve_ms == null) return "";
+  const ms = Math.round(e.resolve_ms);
+  return `<span class="ms ${msGrade(ms,150,400)}">locate ${ms} ms</span>`;
+}
+
 function evRow(e){
   const t = `<span class="t">${fmtClock(e.t)}</span>`;
   const div = document.createElement("div");
   const kind = e.event;
   if (kind === "perceive"){
     const ms = Math.round(e.perceive_ms ?? 0);
+    const where = e.screen ? esc(e.screen) : "unrecognised screen";
     div.className = "ev perceive";
-    div.innerHTML = `${t}<span class="grow">perceive</span><span class="ms ${msGrade(ms,300,600)}">${ms} ms</span>`;
+    div.innerHTML = `${t}<span class="grow">look · ${where}</span>${locateMs(e)}`+
+      `<span class="ms ${msGrade(ms,300,600)}">${ms} ms</span>`;
   } else if (kind === "click"){
     div.className = "ev click";
     const sc = e.score;
     const pill = sc!=null ? `<span class="pill ${sc>=0.9?"ok":sc>=0.8?"warn":"bad"}">${sc.toFixed(2)}</span>` : "";
     const xy = Array.isArray(e.center) ? `<span class="xy">(${e.center[0]},${e.center[1]})</span>` : "";
     const win = e.window ? `<span class="xy">${esc(e.window)}</span>` : "";
-    div.innerHTML = `${t}<span class="grow">click <span class="el">${esc(e.element||"?")}</span> ${xy} ${win}</span>${pill}`;
+    div.innerHTML = `${t}<span class="grow">click <span class="el">${esc(e.element||"?")}</span> ${xy} ${win}</span>`+
+      `${locateMs(e)}${pill}`;
+  } else if (kind === "doing"){
+    // What the job says it is on right now.
+    const extra = e.wait_s!=null ? ` · ${e.wait_s}s` : (e.until_s!=null ? ` · ${e.until_s}s left` : "");
+    div.className = "ev";
+    div.innerHTML = `${t}<span class="grow">${esc(e.what||"working")}${extra}</span>`;
+  } else if (kind === "config-changed"){
+    const pairs = Object.entries(e.changed || {})
+      .map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(", ");
+    div.className = "ev mile";
+    div.innerHTML = `${t}<span class="grow">⚙ setting changed · ${pairs}</span>`;
   } else if (kind === "cycle"){
     div.className = "ev cycle";
     div.innerHTML = `${t}<span class="grow">✓ cycle ${e.completed ?? "?"} complete</span>`;
@@ -604,9 +625,12 @@ function evRow(e){
     div.className = "ev endrow";
     const extra = e.clicks!=null ? ` · ${e.clicks} clicks` : "";
     div.innerHTML = `${t}<span class="grow">■ ${kind==="done"?"finished":"stopped"}: ${esc(e.reason||"")}${extra}</span>`;
-  } else if (kind === "frame-skip" || kind === "click-skip" || kind === "poll-error" || kind === "classify-skip"){
+  } else if (kind === "frame-skip" || kind === "click-skip" || kind === "poll-error"
+             || kind === "classify-skip" || kind === "job-error"){
     div.className = "ev warnrow";
-    div.innerHTML = `${t}<span class="grow">⚠ ${esc(kind)}${e.error?" · "+esc(e.error):""}</span>`;
+    // job-error carries the real story in `what`; the kind alone says nothing.
+    const what = e.what ? esc(e.what) : esc(kind);
+    div.innerHTML = `${t}<span class="grow">⚠ ${what}${e.error?" · "+esc(e.error):""}</span>`;
   } else {
     div.className = "ev";
     div.innerHTML = `${t}<span class="grow">${esc(kind||"event")}</span>`;

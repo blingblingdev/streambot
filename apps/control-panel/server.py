@@ -212,7 +212,12 @@ class FlowLogReader:
     # events stay bounded in memory and on the wire; the page re-fetches
     # them on load, which is what makes chart history survive a refresh.
     HISTORY_MAX_POINTS = 2000
-    ERROR_EVENTS = {"poll-error", "frame-skip", "click-skip", "classify-skip"}
+    # "job-error" is what streambot.job_events.problem() writes, and it is how
+    # every job built on the shared runtime reports trouble; without it the
+    # panel's error count stays at zero while the feed fills with warnings.
+    ERROR_EVENTS = {
+        "poll-error", "frame-skip", "click-skip", "classify-skip", "job-error",
+    }
 
     def __init__(self, path: Path) -> None:
         self.path = path
