@@ -47,6 +47,30 @@ class JobEventsTests(unittest.TestCase):
             self.assertEqual(doing["what"], "building 2-3")
             self.assertEqual(doing["members"], 57)
 
+    def test_an_oversized_log_rotates_when_a_new_session_starts(self) -> None:
+        # The console's store keeps the thirty-day archive; the jsonl is
+        # transport. A new session on a bloated file starts clean — and only
+        # a session boundary may truncate, so the console never re-reads old
+        # lines under new numbering.
+        with TemporaryDirectory() as directory:
+            events = JobEvents("j", jobs_dir=Path(directory))
+            events.start()
+            events.doing("filling the log")
+            with open(events.path, "a", encoding="utf-8") as handle:
+                handle.write("x" * (JobEvents.ROTATE_BYTES + 1) + "\n")
+            events.start()
+            rows = self._read(events.path)
+        self.assertEqual([row["event"] for row in rows], ["start"])
+
+    def test_a_modest_log_accumulates_across_sessions(self) -> None:
+        with TemporaryDirectory() as directory:
+            events = JobEvents("j", jobs_dir=Path(directory))
+            events.start()
+            events.cycle(completed=1)
+            events.start()
+            kinds = [row["event"] for row in self._read(events.path)]
+        self.assertEqual(kinds, ["start", "cycle", "start"])
+
     def test_a_log_that_cannot_be_written_does_not_stop_the_job(self) -> None:
         # The log explains the work; it does not gate it.
         events = JobEvents("j", jobs_dir=Path("/proc/nonexistent-and-unwritable"))

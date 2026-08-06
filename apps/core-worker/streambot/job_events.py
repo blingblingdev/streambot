@@ -32,7 +32,7 @@ from typing import Any
 DEFAULT_JOBS_DIR = Path(
     os.environ.get(
         "STREAMBOT_JOBS_DIR",
-        str(Path.home() / "Codes" / "Private" / "streambot-jobs" / "jobs"),
+        str(Path.home() / "Codes" / "Private" / "lolita" / "streambot-jobs" / "jobs"),
     )
 )
 
@@ -51,10 +51,32 @@ class JobEvents:
     log exists to explain the work, not to gate it.
     """
 
+    # A new session on top of a log this big starts a fresh file instead of
+    # growing it. The console persists every event into its thirty-day store
+    # as it tails, so the jsonl is transport plus a recent buffer, not the
+    # archive — rotation costs nothing the store has seen.
+    ROTATE_BYTES = 8 * 1024 * 1024
+
     def __init__(self, job_name: str, jobs_dir: Path | None = None) -> None:
         self.job_name = job_name
         root = Path(jobs_dir) if jobs_dir else DEFAULT_JOBS_DIR
         self.path = root / job_name / "flow-log.jsonl"
+
+    def _rotate_if_bloated(self) -> None:
+        """Truncate an oversized log, only ever between sessions.
+
+        Between sessions is the one safe moment: the console's tail sees the
+        shrink, resets, and re-reads a file that contains nothing but the new
+        session — no half-session for its counters to misread, and no old
+        lines to re-ingest under new numbering (which would duplicate them
+        in the event store).
+        """
+
+        try:
+            if self.path.stat().st_size > self.ROTATE_BYTES:
+                self.path.write_text("")
+        except Exception:
+            pass
 
     def emit(self, kind: str, **fields: Any) -> None:
         """Write one event. Seconds, because that is what the console reads."""
@@ -70,6 +92,7 @@ class JobEvents:
     def start(self, **fields: Any) -> None:
         """Mark a new session; the console resets its totals here."""
 
+        self._rotate_if_bloated()
         self.emit(START, job=self.job_name, **fields)
 
     def doing(self, what: str, **fields: Any) -> None:
