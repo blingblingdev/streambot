@@ -154,7 +154,20 @@ class FeedDomBoundTest(unittest.TestCase):
 class FeedAfterJobEndTests(unittest.TestCase):
     """A finished job's events stay served: streambot's data outlives the job."""
 
-    def test_status_serves_the_last_active_log_when_nothing_runs(self) -> None:
+    @staticmethod
+    def _write_job_logs(root: Path, now: int) -> None:
+        # job-a is iterated (and so ingested) FIRST but was active LAST —
+        # last-active must follow event time, never ingestion order.
+        for name, age in (("job-a", 30), ("job-b", 600)):
+            (root / name).mkdir()
+            write_lines(root / name / "flow-log.jsonl", [
+                {"t": now - age, "event": "start"},
+                {"t": now - age + 5, "event": "click", "element": name,
+                 "score": 0.9},
+                {"t": now - age + 9, "event": "done", "reason": "finished"},
+            ])
+
+    def test_status_serves_the_last_active_job_when_nothing_runs(self) -> None:
         now = int(time.time())
         registry = {
             name: {"name": name, "title": name, "description": "",
@@ -163,33 +176,41 @@ class FeedAfterJobEndTests(unittest.TestCase):
         }
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            for name, age in (("job-a", 600), ("job-b", 30)):
-                (root / name).mkdir()
-                log = root / name / "flow-log.jsonl"
-                write_lines(log, [
-                    {"t": now - age, "event": "start"},
-                    {"t": now - age + 5, "event": "click", "element": name,
-                     "score": 0.9},
-                    {"t": now - age + 9, "event": "done", "reason": "finished"},
-                ])
-                server.os.utime(log, (now - age, now - age))
-            supervisor = server.JobSupervisor()
+            self._write_job_logs(root, now)
+            store = server.MetricsStore(root / "metrics.db")
+            supervisor = server.JobSupervisor(metrics=store)
             with mock.patch.object(
                 server.JobSupervisor, "registry", staticmethod(lambda: registry)
             ), mock.patch.object(
                 supervisor, "_external_pids", return_value={}
             ), mock.patch.object(server, "JOBS_ROOT", root):
                 rows = {row["name"]: row for row in supervisor.status()}
+                # A console restart loses nothing: a fresh supervisor over the
+                # same store serves the same feed even with the logs gone.
+                for name in registry:
+                    (root / name / "flow-log.jsonl").unlink()
+                reborn = server.JobSupervisor(metrics=store)
+                with mock.patch.object(
+                    reborn, "_external_pids", return_value={}
+                ):
+                    again = {row["name"]: row for row in reborn.status()}
+            store.close()
 
-        self.assertFalse(any(row["running"] for row in rows.values()))
-        # Only the most recently active job speaks for the feed…
+        for snapshot in (rows, again):
+            self.assertFalse(any(row["running"] for row in snapshot.values()))
+            # Only the job that spoke last speaks for the feed…
+            self.assertEqual(
+                [e["event"] for e in snapshot["job-a"]["events"]],
+                ["start", "click", "done"],
+            )
+            self.assertEqual(snapshot["job-b"]["events"], [])
+            # …and a stopped job never reports live rates.
+            self.assertIsNone(snapshot["job-a"]["metrics"])
+        # Same events, same stable ids, before and after the restart.
         self.assertEqual(
-            [e["event"] for e in rows["job-b"]["events"]],
-            ["start", "click", "done"],
+            [e["i"] for e in rows["job-a"]["events"]],
+            [e["i"] for e in again["job-a"]["events"]],
         )
-        self.assertEqual(rows["job-a"]["events"], [])
-        # …and a stopped job never reports live rates.
-        self.assertIsNone(rows["job-b"]["metrics"])
 
 
 class JobAdoptionTests(unittest.TestCase):

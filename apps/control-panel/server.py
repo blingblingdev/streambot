@@ -296,6 +296,7 @@ class FlowLogReader:
         lines = text.split("\n")
         self._remainder = lines.pop()  # trailing partial line, if any
         rows: list[tuple[str, str, int, float]] = []
+        event_rows: list[tuple[str, int, int, str]] = []
         for line in lines:
             line = line.strip()
             if not line:
@@ -311,12 +312,17 @@ class FlowLogReader:
             self._ring.append(event)
             if self.store is not None and self.job:
                 rows.extend(self.store.rows_from_event(self.job, event))
+                t = event.get("t")
+                if isinstance(t, (int, float)):
+                    # The verbatim line, so the store holds what the job said
+                    # rather than a re-serialization of it.
+                    event_rows.append((self.job, int(t), self._line_no, line))
             self._apply(event)
-        if rows and self.store is not None:
+        if (rows or event_rows) and self.store is not None:
             # One transaction per poll, not per event: a cold console re-reads
             # a whole flow log on its first poll, and thousands of individual
             # commits would turn that into seconds of fsync.
-            self.store.write(rows)
+            self.store.write(rows, event_rows)
 
     def _apply(self, event: dict[str, Any]) -> None:
         kind = event.get("event")
@@ -407,6 +413,11 @@ class FlowLogReader:
 
 
     def recent_events(self, limit: int = 60) -> list[dict[str, Any]]:
+        # With a store the feed is read back from it — durable across console
+        # restarts and log rotation, spanning sessions, ids stable. The ring
+        # remains for storeless use and for metrics()' recent window.
+        if self.store is not None and self.job:
+            return self.store.recent_events(self.job, limit)
         return list(self._ring)[-limit:]
 
 
@@ -427,12 +438,17 @@ class MetricsStore:
     worth more than their column stores. Measured on this machine: a full
     day's points insert in 0.14s and a chart query answers in ~10ms.
 
-    Two tables. `points` holds raw samples keyed (job, series, t) — REPLACE
+    Three tables. `points` holds raw samples keyed (job, series, t) — REPLACE
     on conflict makes re-ingesting a flow log idempotent, which is what lets
     a cold console rebuild from the logs it finds. `rollup` holds five-minute
     aggregates behind a watermark, rebuilt incrementally from raw whole
     buckets at a time (delete-and-recompute, so it is idempotent too); wide
     windows read the rollup and stay fast no matter how much raw exists.
+    `events` holds the flow-log lines themselves, keyed (job, t, seq) with
+    INSERT OR IGNORE — so re-ingesting is idempotent *and* keeps each row's
+    original rowid, which the feed uses as its stable, monotonic event id.
+    A job restarting appends rather than replacing: its history accumulates
+    across sessions and leaves by retention, not by being overwritten.
     """
 
     RETENTION_SECONDS = 30 * 24 * 3600
@@ -465,6 +481,14 @@ class MetricsStore:
               primary key (job, series, bucket)
             ) without rowid;
             create table if not exists meta(key text primary key, value integer);
+            create table if not exists events(
+              job text not null, t integer not null,
+              seq integer not null, payload text not null,
+              primary key (job, t, seq)
+            );
+            -- For a job's index entries the rowids come out ordered, which is
+            -- what makes "the newest N of this job" an index walk, not a scan.
+            create index if not exists events_job on events(job);
             """
         )
         self._db.commit()
@@ -501,10 +525,28 @@ class MetricsStore:
                 rows.append((job, "score", t, float(score)))
         return rows
 
-    def write(self, rows: list[tuple[str, str, int, float]]) -> None:
-        if not rows:
+    def write(
+        self,
+        rows: list[tuple[str, str, int, float]],
+        events: list[tuple[str, int, int, str]] = [],
+    ) -> None:
+        """One transaction: chart samples plus the raw events they came from.
+
+        `events` rows are (job, t, seq, payload) with payload the verbatim
+        flow-log line; OR IGNORE keeps the first ingest's rowid forever.
+        """
+
+        if not rows and not events:
             return
         with self._lock:
+            if events:
+                self._db.executemany(
+                    "insert or ignore into events values(?,?,?,?)", events
+                )
+            if not rows:
+                self._db.commit()
+                self._retention_locked()
+                return
             self._db.executemany(
                 "insert or replace into points values(?,?,?,?)", rows
             )
@@ -546,6 +588,7 @@ class MetricsStore:
         horizon = int(time.time()) - self.RETENTION_SECONDS
         self._db.execute("delete from points where t < ?", (horizon,))
         self._db.execute("delete from rollup where bucket < ?", (horizon,))
+        self._db.execute("delete from events where t < ?", (horizon,))
         self._db.commit()
         self._db.execute("pragma incremental_vacuum")
 
@@ -576,6 +619,35 @@ class MetricsStore:
             "insert or replace into meta values('rollup_watermark', ?)", (done,)
         )
         self._db.commit()
+
+    def recent_events(self, job: str, limit: int = 60) -> list[dict[str, Any]]:
+        """The newest events of one job, oldest first, `i` = stable rowid."""
+
+        with self._lock:
+            rows = self._db.execute(
+                "select rowid, payload from events where job=?"
+                " order by rowid desc limit ?",
+                (job, limit),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for rowid, payload in reversed(rows):
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                event["i"] = rowid
+                out.append(event)
+        return out
+
+    def last_event_t(self, job: str) -> int | None:
+        """When this job last said anything — an index seek, safe per tick."""
+
+        with self._lock:
+            row = self._db.execute(
+                "select max(t) from events where job=?", (job,)
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
 
     def pick_step(self, span: int) -> int:
         """The bucket width that keeps a window near the target point count."""
@@ -983,26 +1055,23 @@ class JobSupervisor:
                         "configurable": configurable,
                     }
                 )
-            # A job ending does not erase what happened: the flow log outlives
-            # the process. When nothing is running the feed follows the most
-            # recently active log instead of going blank. (Metrics stay None —
-            # a stopped job has no live rates worth showing.)
+            # A job ending does not erase what happened: events persist in the
+            # metrics store, thirty days like the charts. When nothing is
+            # running the feed follows whichever job spoke last instead of
+            # going blank. (Metrics stay None — a stopped job has no live
+            # rates worth showing.)
             if not any(row["running"] for row in rows):
                 freshest: dict[str, Any] | None = None
-                freshest_mtime = 0.0
+                freshest_t = 0
                 for row in rows:
-                    try:
-                        mtime = (
-                            JOBS_ROOT / row["name"] / "flow-log.jsonl"
-                        ).stat().st_mtime
-                    except OSError:
-                        continue
-                    if mtime > freshest_mtime:
-                        freshest, freshest_mtime = row, mtime
+                    self._flow_reader(row["name"]).poll()
+                    last_t = self.metrics.last_event_t(row["name"])
+                    if last_t is not None and last_t > freshest_t:
+                        freshest, freshest_t = row, last_t
                 if freshest is not None:
-                    reader = self._flow_reader(freshest["name"])
-                    reader.poll()
-                    freshest["events"] = reader.recent_events()
+                    freshest["events"] = self._flow_reader(
+                        freshest["name"]
+                    ).recent_events()
         return rows
 
 

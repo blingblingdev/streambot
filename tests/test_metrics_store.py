@@ -188,6 +188,83 @@ class MetricsStoreTests(unittest.TestCase):
         self.assertLess(history["step"], server.MetricsStore.ROLLUP_STEP)
 
 
+class EventStoreTests(unittest.TestCase):
+    """The feed's events live in the same file, thirty days, job-keyed."""
+
+    def setUp(self) -> None:
+        self._directory = TemporaryDirectory()
+        self.root = Path(self._directory.name)
+        self.store = server.MetricsStore(self.root / "metrics.db")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self._directory.cleanup()
+
+    def _log(self, name: str, events: list[dict]) -> Path:
+        import json as _json
+
+        path = self.root / f"{name}.jsonl"
+        with open(path, "a", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(_json.dumps(event) + "\n")
+        return path
+
+    def test_reingest_is_idempotent_with_stable_ids(self) -> None:
+        path = self._log("a", [
+            {"t": NOW - 60, "event": "start"},
+            click(NOW - 50),
+        ])
+        first = server.FlowLogReader(path, store=self.store, job="a")
+        first.poll()
+        held = first.recent_events()
+        # A console restart: a fresh reader re-reads the whole log.
+        second = server.FlowLogReader(path, store=self.store, job="a")
+        second.poll()
+
+        again = second.recent_events()
+        self.assertEqual(len(again), 2)
+        self.assertEqual([e["i"] for e in held], [e["i"] for e in again])
+        self.assertEqual([e["event"] for e in again], ["start", "click"])
+
+    def test_a_restarted_session_appends_instead_of_overwriting(self) -> None:
+        path = self._log("a", [
+            {"t": NOW - 600, "event": "start"},
+            {"t": NOW - 590, "event": "done", "reason": "first run"},
+        ])
+        reader = server.FlowLogReader(path, store=self.store, job="a")
+        reader.poll()
+        # The job re-creates its log from scratch: line numbers start over,
+        # but earlier history must survive in the store.
+        path.write_text("")
+        self._log("a", [{"t": NOW - 10, "event": "start"}])
+        reader.poll()
+
+        events = reader.recent_events()
+        self.assertEqual(
+            [e["event"] for e in events], ["start", "done", "start"]
+        )
+        ids = [e["i"] for e in events]
+        self.assertEqual(ids, sorted(ids))
+
+    def test_events_leave_by_retention_like_the_points_do(self) -> None:
+        ancient = NOW - server.MetricsStore.RETENTION_SECONDS - 3600
+        self.store.write([], [("a", ancient, 1, '{"event": "start"}')])
+        self.store._last_retention = 0.0  # force the sweep on the next write
+        self.store.write([], [("a", NOW - 10, 2, '{"event": "start"}')])
+        events = self.store.recent_events("a")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(self.store.last_event_t("a"), NOW - 10)
+
+    def test_jobs_keep_their_own_feeds(self) -> None:
+        self.store.write([], [
+            ("a", NOW - 30, 1, '{"event": "start"}'),
+            ("b", NOW - 20, 1, '{"event": "start"}'),
+        ])
+        self.assertEqual(len(self.store.recent_events("a")), 1)
+        self.assertEqual(self.store.last_event_t("b"), NOW - 20)
+        self.assertIsNone(self.store.last_event_t("missing"))
+
+
 class HistoryEndpointShapeTests(unittest.TestCase):
     def test_the_reader_hands_the_store_what_an_event_carries(self) -> None:
         rows = server.MetricsStore.rows_from_event("j", click(NOW))
