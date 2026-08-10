@@ -18,6 +18,31 @@ const CADENCES = [
   { label: "1 min", rate: 60_000 },
   { label: "Pause", rate: 0 },
 ];
+const CADENCE_DEFAULT = 60_000;
+const CADENCE_KEY = "liveFrameCadence";
+
+// The chosen cadence survives reloads, like the rail width. Pause is stored
+// as 0, so an absent key must be told apart from a stored Pause.
+function loadCadence(): number {
+  try {
+    const raw = localStorage.getItem(CADENCE_KEY);
+    if (raw === null) return CADENCE_DEFAULT;
+    const stored = Number(raw);
+    return CADENCES.some((cadence) => cadence.rate === stored)
+      ? stored
+      : CADENCE_DEFAULT;
+  } catch {
+    return CADENCE_DEFAULT;
+  }
+}
+
+function storeCadence(rate: number): void {
+  try {
+    localStorage.setItem(CADENCE_KEY, String(rate));
+  } catch {
+    /* private mode: the choice just resets next visit */
+  }
+}
 
 function LiveFrame({
   controls,
@@ -132,7 +157,7 @@ export function LivePanel({
   /** In a grid cell the row provides the height; in the rail the 16:9 body does. */
   fill?: boolean;
 }) {
-  const [rate, setRate] = useState(60_000);
+  const [rate, setRate] = useState(loadCadence);
   const scene = status?.scene;
   const connection = status?.connection;
   const fresh = freshness(connection?.frame_age_ms);
@@ -168,7 +193,10 @@ export function LivePanel({
           {CADENCES.map((cadence) => (
             <button
               key={cadence.rate}
-              onClick={() => setRate(cadence.rate)}
+              onClick={() => {
+                setRate(cadence.rate);
+                storeCadence(cadence.rate);
+              }}
               className={
                 `cursor-pointer px-2 py-0.5 font-mono text-[10.5px] ` +
                 (rate === cadence.rate
