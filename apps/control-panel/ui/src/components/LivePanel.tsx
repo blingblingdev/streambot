@@ -13,7 +13,6 @@ import { GRADE_TEXT, freshness } from "../lib/format";
 import { Led } from "./ui";
 
 const SCENE_SIZE = [1280, 720] as const;
-const AUTO_CADENCE = 60_000;
 const CADENCES = [
   { label: "1 s", rate: 1000 },
   { label: "1 min", rate: 60_000 },
@@ -34,6 +33,9 @@ function LiveFrame({
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
+    // Paused fetches nothing: the PAUSED veil covers the last frame, so a
+    // refresh would cost the host a JPEG encode nobody can see.
+    if (rate === 0) return;
     let live = true;
     const tick = () => {
       const probe = new Image();
@@ -42,9 +44,7 @@ function LiveFrame({
       probe.src = `/api/snapshot?t=${Date.now()}`;
     };
     tick();
-    // Paused still refreshes once a minute, so the view never goes stale
-    // enough to mislead.
-    const timer = setInterval(tick, rate > 0 ? rate : AUTO_CADENCE);
+    const timer = setInterval(tick, rate);
     return () => {
       live = false;
       clearInterval(timer);
@@ -110,6 +110,15 @@ function LiveFrame({
             Detected controls overlay the frame; click a marker to dispatch it.
           </div>
         )}
+        {rate === 0 ? (
+          // Veils the stale frame (and swallows clicks on control markers)
+          // the moment Pause is selected.
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/90">
+            <span className="font-mono text-[13px] tracking-[0.35em] text-muted select-none">
+              PAUSED
+            </span>
+          </div>
+        ) : null}
       </div>
     </div>
   );
