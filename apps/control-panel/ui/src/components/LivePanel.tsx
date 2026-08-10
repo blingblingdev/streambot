@@ -144,15 +144,18 @@ export function LivePanel({
         (fill ? "rounded-[10px] border" : "shrink-0 border-b")
       }
     >
-      <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 text-[11px] tracking-wide text-faint uppercase">
-        Live frame
-        <span className="ml-1 font-mono normal-case text-muted">
+      {/* A single non-wrapping line: the scene name truncates instead of
+          pushing the cadence buttons onto a second row, so the rail below
+          never shifts when a scene (and its badge) appears. */}
+      <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-[11px] tracking-wide text-faint uppercase">
+        <span className="shrink-0">Live frame</span>
+        <span className="ml-1 min-w-0 flex-1 truncate font-mono normal-case text-muted">
           {scene?.primary_layout || "—"}
         </span>
         {scene?.primary_layout != null ? (
           <span
             className={
-              `rounded-full border px-1.5 py-px text-[9.5px] ` +
+              `shrink-0 rounded-full border px-1.5 py-px text-[9.5px] whitespace-nowrap ` +
               (scene.actionable
                 ? "border-ok/45 bg-ok/10 text-ok"
                 : "border-line text-muted")
@@ -161,7 +164,7 @@ export function LivePanel({
             {scene.actionable ? "Actionable" : "Observing"}
           </span>
         ) : null}
-        <div className="ml-auto flex overflow-hidden rounded-md border border-line normal-case">
+        <div className="flex shrink-0 overflow-hidden rounded-md border border-line normal-case">
           {CADENCES.map((cadence) => (
             <button
               key={cadence.rate}
@@ -188,8 +191,8 @@ export function LivePanel({
       {/* The stream's vitals belong on the stream's own picture: what state
           it is in, how fresh this frame is, how many times it has had to
           reconnect, and what it can see. */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 border-t border-line px-3 py-1.5 font-mono text-[11px] text-muted">
-        <span className="flex items-center gap-1.5">
+      <div className="flex items-center gap-x-4 border-t border-line px-3 py-1.5 font-mono text-[11px] text-muted">
+        <span className="flex shrink-0 items-center gap-1.5">
           <Led
             grade={
               connection?.state === "observing" || connection?.state === "acting"
@@ -201,11 +204,13 @@ export function LivePanel({
           />
           {connection?.state ?? "stopped"}
         </span>
-        <span className={GRADE_TEXT[fresh.grade]}>{fresh.text}</span>
-        <span className="ml-auto">
+        <span className={`min-w-0 flex-1 truncate ${GRADE_TEXT[fresh.grade]}`}>
+          {fresh.text}
+        </span>
+        <span className="shrink-0 whitespace-nowrap">
           reconnects <span className="text-text">{connection?.reconnects ?? "—"}</span>
         </span>
-        <span>
+        <span className="shrink-0 whitespace-nowrap">
           controls <span className="text-text">{scene?.controls.length ?? 0}</span>
         </span>
       </div>
