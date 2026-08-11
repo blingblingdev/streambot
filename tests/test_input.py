@@ -372,6 +372,38 @@ class SafeInputDriverTests(unittest.TestCase):
         self.assertEqual(transport.events.count(release), 2)
         self.assertEqual(subject.held_input_count, 0)
 
+    def test_typed_key_whose_up_fails_is_released_not_left_held(self) -> None:
+        transport = FakeTransport()
+        up = ("keyboard", 65, KEY_ACTION_UP, 0)
+        transport.failures[up] = 1
+        subject = driver((), transport)
+
+        with self.assertRaises(InputTransportError):
+            subject.execute_text("a", "type-1")
+
+        # The failed UP is retried by cleanup: the key must not stay down on
+        # the host, where it would corrupt every input after this one.
+        self.assertEqual(transport.events.count(up), 2)
+        self.assertEqual(subject.held_input_count, 0)
+        # The failure did not consume the idempotency key: a retry types.
+        subject.execute_text("a", "type-1")
+        self.assertEqual(
+            transport.events.count(("keyboard", 65, KEY_ACTION_DOWN, 0)), 2
+        )
+
+    def test_typed_key_whose_down_fails_gets_a_compensating_release(self) -> None:
+        transport = FakeTransport()
+        down = ("keyboard", 65, KEY_ACTION_DOWN, 0)
+        up = ("keyboard", 65, KEY_ACTION_UP, 0)
+        transport.failures[down] = 1
+        subject = driver((), transport)
+
+        with self.assertRaises(InputTransportError):
+            subject.execute_text("a", "type-1")
+
+        self.assertEqual(transport.events, [down, up])
+        self.assertEqual(subject.held_input_count, 0)
+
     def test_rejected_press_still_gets_a_compensating_release(self) -> None:
         transport = FakeTransport()
         press = ("mouse_button", BUTTON_ACTION_PRESS, 1)

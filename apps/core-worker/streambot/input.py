@@ -275,16 +275,33 @@ class SafeInputDriver:
             # action from the operator's point of view, and charging it per
             # character would trip the limit on a single URL.
             self._check_rate()
-            for character in text:
-                mapping = _TYPE_KEYS.get(character)
-                if mapping is None:
-                    continue
-                key_code, shifted = mapping
-                modifiers = MODIFIERS["shift"] if shifted else 0
-                if self._safety.dry_run:
-                    continue
-                self._send(self._transport.keyboard, key_code, KEY_ACTION_DOWN, modifiers)
-                self._send(self._transport.keyboard, key_code, KEY_ACTION_UP, modifiers)
+            try:
+                for character in text:
+                    mapping = _TYPE_KEYS.get(character)
+                    if mapping is None:
+                        continue
+                    key_code, shifted = mapping
+                    modifiers = MODIFIERS["shift"] if shifted else 0
+                    if self._safety.dry_run:
+                        continue
+                    # Tracked like any tap: if the UP send fails, the key is
+                    # in _pressed_keys and the cleanup below releases it —
+                    # an untracked stuck key would corrupt every input after.
+                    key = (key_code, modifiers)
+                    self._pressed_keys[key] = None
+                    self._send(
+                        self._transport.keyboard, key_code, KEY_ACTION_DOWN, modifiers
+                    )
+                    self._send(
+                        self._transport.keyboard, key_code, KEY_ACTION_UP, modifiers
+                    )
+                    self._pressed_keys.pop(key, None)
+            except BaseException as error:
+                try:
+                    self._release_all_locked()
+                except InputCleanupError as cleanup_error:
+                    error.add_note(str(cleanup_error))
+                raise
             self._completed_keys.add(idempotency_key)
 
     def execute_position(self, x: int, y: int, idempotency_key: str) -> None:
