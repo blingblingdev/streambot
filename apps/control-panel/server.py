@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -96,8 +97,17 @@ class WorkerSupervisor:
             if self._process is not None and self._process.poll() is None:
                 return {"ok": False, "error": "AlreadyRunning"}
             if self.socket_path.exists():
-                # A worker from another launch context already owns the socket.
-                return {"ok": False, "error": "SocketOwnedElsewhere"}
+                # Occupied only if a live worker process actually owns it. A
+                # crashed or SIGKILLed worker never unlinks its socket, and
+                # refusing on the file alone wedges the console until someone
+                # removes it by hand (AGENTS.md: a leftover socket is stale
+                # only once the owning process is confirmed gone).
+                if self.external_pid() is not None:
+                    return {"ok": False, "error": "SocketOwnedElsewhere"}
+                try:
+                    self.socket_path.unlink()
+                except OSError:
+                    return {"ok": False, "error": "StaleSocketUnremovable"}
             LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             self._log_path = LOG_DIR / "worker.log"
             log = open(self._log_path, "a", encoding="utf-8")
@@ -1396,12 +1406,55 @@ class ConsoleState:
         }
 
 
+# Hostnames a request may address this console as, and page origins allowed
+# to script it. The console binds 127.0.0.1 only, but "local" is not enough:
+# any web page the operator visits can fire cross-origin POSTs at
+# http://127.0.0.1:8787 (start/stop the worker, dispatch clicks), and DNS
+# rebinding lets a remote page read /api/snapshot — live desktop frames.
+# A strict Host allowlist defeats rebinding (the rebound request carries the
+# attacker's hostname); an Origin check defeats cross-site requests (browsers
+# always attach Origin to cross-origin requests). Any localhost port is
+# allowed so the UI dev server's proxy keeps working.
+_LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "[::1]", "::1"}
+
+
+def _is_local_host_header(value: str | None) -> bool:
+    if not value:
+        return False  # HTTP/1.1 requires Host; absent means not a browser we trust
+    host = value.strip()
+    if host.startswith("["):  # bracketed IPv6, optionally with a port
+        host = host.split("]", 1)[0] + "]"
+    else:
+        host = host.rsplit(":", 1)[0] if ":" in host else host
+    return host.lower() in _LOCAL_HOSTNAMES
+
+
+def _is_local_origin(value: str | None) -> bool:
+    if value is None:
+        return True  # same-origin GETs and non-browser clients send no Origin
+    parsed = urllib.parse.urlsplit(value.strip())
+    if parsed.scheme != "http" or parsed.hostname is None:
+        return False  # includes "null" and https origins: never ours
+    return parsed.hostname.lower() in {"127.0.0.1", "localhost", "::1"}
+
+
 class Handler(BaseHTTPRequestHandler):
     console: ConsoleState = None  # set on the server instance
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *_args) -> None:  # silence default stderr logging
         return
+
+    def _reject_cross_origin(self) -> bool:
+        """Refuse requests not addressed to, and initiated from, this machine."""
+
+        if not _is_local_host_header(self.headers.get("Host")):
+            self._send_json({"ok": False, "error": "ForbiddenHost"}, code=403)
+            return True
+        if not _is_local_origin(self.headers.get("Origin")):
+            self._send_json({"ok": False, "error": "ForbiddenOrigin"}, code=403)
+            return True
+        return False
 
     def _send_json(self, payload: dict[str, Any], code: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1459,6 +1512,12 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _read_json(self) -> dict[str, Any]:
+        # A cross-site form can smuggle a JSON-shaped body as text/plain
+        # without triggering a CORS preflight; honest clients say what they
+        # send. Wrong or missing Content-Type reads as an empty body.
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0]
+        if content_type.strip().lower() != "application/json":
+            return {}
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0 or length > 65_536:
             return {}
@@ -1472,6 +1531,8 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ routes
 
     def do_GET(self) -> None:
+        if self._reject_cross_origin():
+            return
         route = self.path.split("?", 1)[0]  # ignore query string when routing
         if route == "/" or not route.startswith("/api/"):
             # The page and every built asset. Anything that is not a real file
@@ -1518,6 +1579,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": "NotFound"}, code=404)
 
     def do_POST(self) -> None:
+        if self._reject_cross_origin():
+            return
         supervisor = self.console.supervisor
         # Routed the same way as GET. These used to match `self.path` whole,
         # so a trailing query string would have fallen through to a 404.

@@ -211,7 +211,10 @@ export function App() {
           ) : null}
           <Button
             kind="primary"
-            disabled={worker?.pid != null || worker?.socket_present}
+            // A socket with no live worker pid is a stale leftover from a
+            // crash; the server clears it on start, so only a live worker
+            // disables the button.
+            disabled={worker?.pid != null}
             onClick={() => act(api.startWorker, "Worker starting", "Start failed")}
           >
             Start worker
