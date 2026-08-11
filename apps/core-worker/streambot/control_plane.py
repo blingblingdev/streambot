@@ -33,6 +33,13 @@ from streambot.watchdog import StallWatchdog
 DEFAULT_SOCKET_PATH = Path(".state/poc/control.sock")
 MAX_RESPONSE_BYTES = 1_048_576
 
+# How long a requester waits for its action to finish. Must exceed the longest
+# single gesture (a max-duration trace is ~4.1s) with room for one such
+# gesture already running ahead of it in the queue — a timed-out wait is not
+# free: the command is abandoned, and telling a caller "failed" about a
+# gesture that then lands invites a duplicate.
+ACTION_WAIT_SECONDS = 10.0
+
 # How many elements one analyze request may ask for. Work is bounded at the
 # input rather than by a wall clock: a match in progress cannot be interrupted,
 # so the honest guard is to limit what can be asked for (this, plus the
@@ -43,13 +50,23 @@ MAX_ANALYZE_ELEMENTS = 32
 
 @dataclass
 class PendingCommand:
-    """One validated action request waiting for the input-owner thread."""
+    """One validated action request waiting for the input-owner thread.
+
+    `state` moves queued → running → done under `lock`. A requester that
+    stops waiting marks the command `abandoned`: abandoned-while-queued is
+    never executed, abandoned-while-running has its real outcome journaled
+    by the executor, since the requester was already answered.
+    """
 
     request_id: str
     command: str
     arguments: dict[str, Any]
+    job: str | None = None
+    started: float = 0.0
     completed: Event = field(default_factory=Event)
     response: dict[str, Any] | None = None
+    lock: Lock = field(default_factory=Lock)
+    state: str = "queued"
 
 
 class PersistentControlPlane:
@@ -96,6 +113,8 @@ class PersistentControlPlane:
         self._element_lock = Lock()
         self._element_resolvers: dict[str, ElementResolver] = {}
         self._automation_enabled = False
+        # Instance attribute so tests can shrink the wait without patching.
+        self.action_wait_seconds = ACTION_WAIT_SECONDS
         self._commands: Queue[PendingCommand] = Queue(maxsize=32)
         self._stop = Event()
         self._lock = Lock()
@@ -305,6 +324,22 @@ class PersistentControlPlane:
             self._run_command(inputs, pending)
 
     def _run_command(self, inputs: SafeInputDriver, pending: PendingCommand) -> None:
+        with pending.lock:
+            if pending.state == "abandoned":
+                # The requester was already told CommandTimeout while this sat
+                # queued; running it now would perform an action its caller
+                # believes failed — the exact recipe for a double click.
+                pending.response = {"ok": False, "error": "AbandonedBeforeExecution"}
+                pending.completed.set()
+                self.journal.record(
+                    ACT,
+                    job=pending.job,
+                    ok=False,
+                    command=pending.command,
+                    error="AbandonedBeforeExecution",
+                )
+                return
+            pending.state = "running"
         try:
             pending.response = self._execute(inputs, pending)
             with self._lock:
@@ -312,6 +347,23 @@ class PersistentControlPlane:
         except Exception as error:
             pending.response = {"ok": False, "error": type(error).__name__}
         finally:
+            with pending.lock:
+                answered_as_timeout = pending.state == "abandoned"
+                pending.state = "done"
+            if answered_as_timeout:
+                # The requester already got CommandTimeout; record what
+                # actually happened so the audit trail tells the truth.
+                response = pending.response or {}
+                self.journal.record(
+                    ACT,
+                    job=pending.job,
+                    ok=bool(response.get("ok", False)),
+                    command=pending.command,
+                    ms=(time.perf_counter() - pending.started) * 1000.0,
+                    arguments=pending.arguments,
+                    error=response.get("error"),
+                    late_completion=True,
+                )
             pending.completed.set()
 
     def _execute(
@@ -701,14 +753,27 @@ class PersistentControlPlane:
         started = time.perf_counter()
         request_id = str(payload.get("id") or uuid4().hex)
         arguments = dict(payload.get("arguments", {}))
-        pending = PendingCommand(request_id, command, arguments)
+        pending = PendingCommand(
+            request_id, command, arguments, job=job, started=started
+        )
         self._commands.put(pending, timeout=0.5)
-        if not pending.completed.wait(timeout=3.0):
-            self.journal.record(
-                ACT, job=job, ok=False, command=command,
-                ms=(time.perf_counter() - started) * 1000.0, error="CommandTimeout",
-            )
-            return {"ok": False, "error": "CommandTimeout"}
+        if not pending.completed.wait(timeout=self.action_wait_seconds):
+            with pending.lock:
+                state = pending.state
+                if state in {"queued", "running"}:
+                    pending.state = "abandoned"
+            if state != "done":
+                # queued: the executor will skip it, so it never runs.
+                # running: it cannot be recalled mid-gesture; the executor
+                # journals the actual outcome as a late completion.
+                self.journal.record(
+                    ACT, job=job, ok=False, command=command,
+                    ms=(time.perf_counter() - started) * 1000.0,
+                    error="CommandTimeout", abandoned_while=state,
+                )
+                return {"ok": False, "error": "CommandTimeout"}
+            # done: it finished between the wait expiring and the lock —
+            # a real response exists, so answer with it.
         response = pending.response or {"ok": False, "error": "MissingResponse"}
         self.journal.record(
             ACT,
@@ -747,7 +812,11 @@ def send_control_command(
     if command == "snapshot" and arguments:
         payload["output"] = arguments["output"]
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(4.0)
+        # Must outlast the worker's own action wait (ACTION_WAIT_SECONDS), so
+        # the worker's verdict — not a client socket timeout — decides how a
+        # slow gesture is reported. A dead worker still fails fast: connect()
+        # on a dead socket raises immediately.
+        client.settimeout(ACTION_WAIT_SECONDS + 2.0)
         client.connect(str(socket_path))
         client.sendall((json.dumps(payload, sort_keys=True) + "\n").encode())
         data = b""

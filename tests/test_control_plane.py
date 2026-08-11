@@ -323,3 +323,68 @@ class TypeCommandTests(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         self.assertEqual([c[1] for c in inputs.calls], ["ab1"])
+
+
+class SlowInputs(FakeInputs):
+    """Inputs whose glide outlasts the requester's patience."""
+
+    def execute_glide(self, x: int, y: int, key: str) -> None:
+        time.sleep(0.4)
+        super().execute_glide(x, y, key)
+
+
+class CommandTimeoutTests(unittest.TestCase):
+    """A timed-out action must never quietly execute later.
+
+    The requester is told CommandTimeout and will retry; if the abandoned
+    command then runs anyway, the gesture lands twice on the host.
+    """
+
+    def test_a_command_abandoned_while_queued_is_never_executed(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            plane.action_wait_seconds = 0.15
+            inputs = FakeInputs()
+            plane.start()
+            try:
+                # No executor drains the queue, so the command sits queued
+                # past the wait and the requester is told CommandTimeout.
+                response = send_control_command(
+                    plane.socket_path, "click", arguments={"x": 10, "y": 20}
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"], "CommandTimeout")
+                # Draining afterwards must skip it, not click.
+                plane.execute_pending(inputs)
+                self.assertEqual(inputs.calls, [])
+            finally:
+                plane.close()
+            journal = (Path(directory) / "operations.jsonl").read_text()
+            self.assertIn("CommandTimeout", journal)
+            self.assertIn("AbandonedBeforeExecution", journal)
+
+    def test_a_command_still_running_at_timeout_journals_its_outcome(self) -> None:
+        with TemporaryDirectory() as directory:
+            plane = PersistentControlPlane(Path(directory) / "control.sock")
+            plane.action_wait_seconds = 0.15
+            inputs = SlowInputs()
+            plane.start()
+            plane.start_executor(inputs)
+            try:
+                response = send_control_command(
+                    plane.socket_path, "click", arguments={"x": 10, "y": 20}
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"], "CommandTimeout")
+                # The gesture cannot be recalled mid-flight; it completes.
+                deadline = time.monotonic() + 2.0
+                while not inputs.calls and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(inputs.calls[0][:3], ("glide", 10, 20))
+            finally:
+                plane.close()
+            # The audit trail records both the timeout verdict the requester
+            # saw and what actually happened afterwards.
+            journal = (Path(directory) / "operations.jsonl").read_text()
+            self.assertIn("CommandTimeout", journal)
+            self.assertIn("late_completion", journal)
