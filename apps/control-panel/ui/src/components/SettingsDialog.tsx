@@ -96,7 +96,9 @@ export function SettingsDialog({
                 </div>
               ) : null}
 
-              {config.schema.fields.map((field) => {
+              {config.schema.fields
+                .filter((field) => !field.multiline)
+                .map((field) => {
                 const value = values[field.key];
                 const commit = (raw: string | boolean) =>
                   apply({ [field.key]: coerce(field, raw) });
@@ -156,6 +158,43 @@ export function SettingsDialog({
                   </div>
                 );
               })}
+
+              {/* Multi-line text fields are edited in a full-width box at the
+                  bottom, where a watchlist of one-per-line rules is readable —
+                  a 130px row never was. */}
+              {config.schema.fields
+                .filter((field) => field.multiline)
+                .map((field) => (
+                  <div key={field.key} className="mt-3 border-t border-line pt-3">
+                    <label
+                      className="mb-1.5 block text-[12.5px] text-muted"
+                      title={field.help}
+                      htmlFor={`cfg-${field.key}`}
+                    >
+                      {field.label || field.key}
+                    </label>
+                    <textarea
+                      id={`cfg-${field.key}`}
+                      rows={7}
+                      value={String(values[field.key] ?? "")}
+                      onChange={(event) =>
+                        setValues((held) => ({
+                          ...held,
+                          [field.key]: event.target.value,
+                        }))
+                      }
+                      onBlur={(event) =>
+                        apply({ [field.key]: coerce(field, event.target.value) })
+                      }
+                      className="w-full resize-y rounded-md border border-line bg-panel2 px-2.5 py-2 font-mono text-[12.5px] leading-relaxed text-text"
+                    />
+                    {field.help ? (
+                      <div className="mt-1 text-[11px] leading-relaxed text-faint">
+                        {field.help}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
 
               <div className="mt-2.5 text-[11.5px] leading-relaxed text-faint">
                 A running job picks these up at its next look — nothing restarts.

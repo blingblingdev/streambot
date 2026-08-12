@@ -126,6 +126,37 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(payload["fields"][0]["unit"], "s")
         self.assertEqual(payload["presets"][1]["label"], "Long")
 
+    def test_multiline_text_field_serialises_and_allows_a_long_value(self) -> None:
+        schema = ConfigSchema.from_manifest(
+            {
+                "fields": [
+                    {
+                        "key": "watchlist",
+                        "type": "text",
+                        "multiline": True,
+                        "default": "a <= 1\nb <= 2",
+                    }
+                ]
+            }
+        )
+        payload = schema.as_dict()
+        self.assertTrue(payload["fields"][0]["multiline"])
+        # A multi-line list needs more room than a single-line box allows.
+        long_list = "\n".join(f"item{i} <= {i}万" for i in range(150))
+        self.assertGreater(len(long_list), 200)
+        self.assertEqual(schema.validate({"watchlist": long_list})["watchlist"], long_list)
+
+    def test_multiline_is_rejected_on_a_non_text_field(self) -> None:
+        with self.assertRaises(ConfigurationError):
+            ConfigSchema.from_manifest(
+                {
+                    "fields": [
+                        {"key": "n", "type": "integer", "min": 0, "max": 9,
+                         "default": 1, "multiline": True}
+                    ]
+                }
+            )
+
 
 class ValuesFileTests(unittest.TestCase):
     def setUp(self) -> None:

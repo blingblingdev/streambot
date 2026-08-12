@@ -155,6 +155,8 @@ export interface ConfigField {
   choices?: string[];
   unit?: string;
   help?: string;
+  /** A text field edited in a full-width, multi-line box at the bottom. */
+  multiline?: boolean;
 }
 
 export interface ConfigPreset {

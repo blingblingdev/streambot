@@ -42,6 +42,9 @@ from .config import ConfigurationError, _integer, _mapping, _number, _strict_key
 MAX_FIELDS = 64
 MAX_PRESETS = 16
 MAX_TEXT_LENGTH = 200
+# A multi-line field holds a list — one rule per line — so it needs more room
+# than a single-line box, but still a bound the console can refuse past.
+MAX_MULTILINE_TEXT_LENGTH = 4000
 
 FIELD_TYPES = {"integer", "number", "boolean", "enum", "text"}
 
@@ -67,6 +70,7 @@ class ConfigField:
     choices: tuple[str, ...] = ()
     unit: str = ""
     help: str = ""
+    multiline: bool = False
 
     @classmethod
     def from_mapping(cls, data: object, path: str) -> "ConfigField":
@@ -74,7 +78,7 @@ class ConfigField:
         _strict_keys(
             mapping,
             required={"key", "type", "default"},
-            optional={"label", "min", "max", "choices", "unit", "help"},
+            optional={"label", "min", "max", "choices", "unit", "help", "multiline"},
             path=path,
         )
         key = mapping["key"]
@@ -93,6 +97,9 @@ class ConfigField:
             if not isinstance(raw, Sequence) or isinstance(raw, str) or not raw:
                 raise ConfigurationError(f"{path}.choices must be a non-empty list")
             choices = tuple(str(choice) for choice in raw)
+        multiline = bool(mapping.get("multiline", False))
+        if multiline and kind != "text":
+            raise ConfigurationError(f"{path}.multiline is only valid for a text field")
         if kind in {"integer", "number"}:
             if minimum is None or maximum is None:
                 # A number without bounds is a number nobody can safely type
@@ -113,6 +120,7 @@ class ConfigField:
             choices=choices,
             unit=str(mapping.get("unit", "")),
             help=str(mapping.get("help", "")),
+            multiline=multiline,
         )
         # A default that the field itself would reject is a declaration bug.
         field.coerce(field.default, f"{path}.default")
@@ -135,7 +143,8 @@ class ConfigField:
             return text
         if self.type == "text":
             text = str(value)
-            if len(text) > MAX_TEXT_LENGTH:
+            limit = MAX_MULTILINE_TEXT_LENGTH if self.multiline else MAX_TEXT_LENGTH
+            if len(text) > limit:
                 raise ConfigurationError(f"{where} is too long")
             return text
         if self.type == "integer":
@@ -159,6 +168,8 @@ class ConfigField:
             payload["unit"] = self.unit
         if self.help:
             payload["help"] = self.help
+        if self.multiline:
+            payload["multiline"] = True
         return payload
 
 
