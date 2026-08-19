@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "apps" / "core-worker"))
 from streambot.notification_publisher import (  # noqa: E402
     CoconutShellClient,
     CoconutShellError,
+    EventNotificationPublisher,
     HourlyNotificationPublisher,
     PublisherConfig,
     PublisherConfigurationError,
@@ -76,7 +78,7 @@ class PublisherConfigTests(unittest.TestCase):
 
     def test_enabled_configuration_requires_https_and_a_bounded_token(self) -> None:
         values = {
-            "STREAMBOT_HOURLY_PUBLISHER_ENABLED": "true",
+            "STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED": "true",
             "COCONUT_SHELL_BASE_URL": "https://coconut.example.test",
             "COCONUT_SHELL_STREAMBOT_SOURCE_TOKEN": "cshp_v1_" + "x" * 43,
         }
@@ -205,6 +207,10 @@ class FakeClient:
             raise CoconutShellError("safe failure")
         return {"id": "event-1", "state": "pending"}
 
+    def submit_event(self, type_key, key, occurred_at, data, media_ids):
+        self.submissions.append((type_key, key, occurred_at, data, list(media_ids)))
+        return {"id": "event-1", "state": "pending"}
+
     def status(self, notification_id):
         self.status_calls += 1
         return {"id": notification_id, "state": "succeeded"}
@@ -278,6 +284,125 @@ class HourlyPublisherTests(unittest.TestCase):
         self.assertEqual(client.heartbeats[0]["state"], "idle_skip")
         self.assertEqual(publisher.status()["heartbeat_state"], "confirmed")
         self.assertEqual(publisher.status()["heartbeat_at"], "2026-08-19T10:23:45Z")
+
+    def test_heartbeat_degrades_when_event_lane_is_unhealthy(self) -> None:
+        client = FakeClient()
+        publisher = HourlyNotificationPublisher(
+            self.config(),
+            lambda _now: snapshot(False),
+            lambda: None,
+            client=client,
+            clock=lambda: NOW,
+        )
+        publisher.run_once(NOW)
+        publisher.include_health(
+            lambda: {"state": "failed", "reason": "Terminal delivery failed."}
+        )
+        publisher._send_heartbeat()
+        self.assertEqual(client.heartbeats[0]["state"], "degraded")
+        self.assertEqual(
+            client.heartbeats[0]["reason"], "Terminal delivery failed."
+        )
+
+
+class EventPublisherTests(unittest.TestCase):
+    def config(self) -> PublisherConfig:
+        return PublisherConfig(
+            enabled=True,
+            base_url="https://coconut.example.test",
+            source_token="cshp_v1_" + "x" * 43,
+            poll_interval=0.001,
+            terminal_timeout=1,
+            submit_attempts=1,
+        )
+
+    def test_first_enable_initializes_without_historical_backfill(self) -> None:
+        cursor = {"value": None}
+        publisher = EventNotificationPublisher(
+            self.config(),
+            lambda _after, _limit: [],
+            lambda: 42,
+            lambda: cursor["value"],
+            lambda value: cursor.update(value=value),
+            lambda: {},
+            Path("/unused"),
+            client=FakeClient(),
+        )
+        result = publisher.run_once()
+        self.assertEqual(cursor["value"], 42)
+        self.assertEqual(result["state"], "ready")
+        self.assertIn("without historical", result["reason"])
+
+    def test_event_advances_only_after_terminal_success_and_writes_ack(self) -> None:
+        cursor = {"value": 0}
+        event_id = "a" * 32
+        event = {
+            "rowid": 1,
+            "job": "poly-bridge",
+            "event": "notification",
+            "notification_kind": "completed",
+            "event_id": event_id,
+            "data": {"placed_count": 8},
+            "t": int(NOW.timestamp()),
+        }
+        client = FakeClient()
+        with TemporaryDirectory() as directory:
+            publisher = EventNotificationPublisher(
+                self.config(),
+                lambda after, _limit: [event] if after < 1 else [],
+                lambda: 1,
+                lambda: cursor["value"],
+                lambda value: cursor.update(value=value),
+                lambda: {
+                    "poly-bridge": {
+                        "completed": {
+                            "type": "streambot.poly_bridge.completed",
+                            "artifact": "none",
+                        }
+                    }
+                },
+                Path(directory),
+                client=client,
+                clock=lambda: NOW,
+            )
+            result = publisher.run_once()
+            ack = json.loads(
+                (Path(directory) / "acks" / f"{event_id}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(cursor["value"], 1)
+        self.assertEqual(ack["state"], "succeeded")
+        self.assertEqual(client.submissions[0][0], "streambot.poly_bridge.completed")
+
+    def test_unmapped_event_is_skipped_without_network(self) -> None:
+        cursor = {"value": 0}
+        client = FakeClient()
+        publisher = EventNotificationPublisher(
+            self.config(),
+            lambda _after, _limit: [
+                {
+                    "rowid": 1,
+                    "job": "unknown",
+                    "event": "notification",
+                    "notification_kind": "completed",
+                    "event_id": "a" * 32,
+                    "data": {},
+                    "t": int(NOW.timestamp()),
+                }
+            ],
+            lambda: 1,
+            lambda: cursor["value"],
+            lambda value: cursor.update(value=value),
+            lambda: {},
+            Path("/unused"),
+            client=client,
+        )
+        result = publisher.run_once()
+        self.assertEqual(result["state"], "ignored")
+        self.assertEqual(cursor["value"], 1)
+        self.assertEqual(client.submissions, [])
 
 
 if __name__ == "__main__":

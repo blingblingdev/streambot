@@ -116,17 +116,27 @@ Streambot producer token scoped by Coconut Shell to `streambot.*` types. It is
 not a Feishu credential.
 
 ```text
-STREAMBOT_HOURLY_PUBLISHER_ENABLED=true
+STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED=true
 STREAMBOT_HOURLY_PUBLISHER_INCLUDE_SNAPSHOT=true
 COCONUT_SHELL_BASE_URL=https://coconut-shell.example.test:8443
 COCONUT_SHELL_STREAMBOT_SOURCE_TOKEN=<external producer token>
 ```
 
 Use HTTPS except for a loopback-only test server. Enabling the process setting
-does not enable the Coconut Shell notification type: `streambot.hourly_status`
-must pass its separate cutover gate. The publisher does not backfill missed
-hours. A restart within the same UTC hour reuses the same idempotency key, so
-Coconut Shell returns the existing event rather than sending a duplicate.
+does not enable any Coconut Shell notification type: each `streambot.*` type
+must pass its separate cutover gate. The hourly publisher does not backfill
+missed hours. A restart within the same UTC hour reuses the same idempotency
+key, so Coconut Shell returns the existing event rather than sending a
+duplicate.
+
+Jobs request typed notifications through `JobEvents.notification`; they never
+load Coconut Shell or Feishu credentials. Each `job.json` maps its bounded
+logical event names to allowlisted `streambot.*` types and declares whether an
+image artifact is forbidden, optional, or required. Streambot collects those
+events in its existing SQLite event store, uploads private spooled evidence,
+waits for a terminal Coconut Shell result, and only then writes a local
+acknowledgement. The first enable initializes at the newest collected event,
+so historical flow logs are not replayed.
 
 An unavailable snapshot is optional and does not block the text card. The
 publisher polls the source-scoped event status to a terminal result and exposes

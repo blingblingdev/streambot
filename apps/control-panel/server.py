@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sqlite3
 import stat
@@ -50,6 +51,7 @@ from streambot.job_config import (  # noqa: E402
     write_values,
 )
 from streambot.notification_publisher import (  # noqa: E402
+    EventNotificationPublisher,
     HourlyNotificationPublisher,
     PublisherConfig,
     StreambotNotificationSnapshot,
@@ -665,6 +667,51 @@ class MetricsStore:
             ).fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
+    def latest_event_rowid(self) -> int:
+        with self._lock:
+            row = self._db.execute("select max(rowid) from events").fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    def notification_cursor(self) -> int | None:
+        with self._lock:
+            row = self._db.execute(
+                "select value from meta where key='notification_cursor'"
+            ).fetchone()
+        return int(row[0]) if row else None
+
+    def set_notification_cursor(self, rowid: int) -> None:
+        if not isinstance(rowid, int) or rowid < 0:
+            raise ValueError("notification cursor must be a non-negative integer")
+        with self._lock:
+            self._db.execute(
+                "insert or replace into meta values('notification_cursor', ?)",
+                (rowid,),
+            )
+            self._db.commit()
+
+    def events_after(self, rowid: int, limit: int) -> list[dict[str, Any]]:
+        """Return collected events in durable order for platform publishing."""
+
+        bounded_limit = min(max(int(limit), 1), 500)
+        with self._lock:
+            rows = self._db.execute(
+                "select rowid, job, payload from events where rowid>?"
+                " order by rowid limit ?",
+                (rowid, bounded_limit),
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for stored_rowid, job, payload in rows:
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                event = {}
+            if not isinstance(event, dict):
+                event = {}
+            event["rowid"] = int(stored_rowid)
+            event["job"] = str(job)
+            events.append(event)
+        return events
+
     def pick_step(self, span: int) -> int:
         """The bucket width that keeps a window near the target point count."""
 
@@ -874,8 +921,44 @@ class JobSupervisor:
                 # the schema is validated where it is used, so one job's
                 # malformed block cannot hide every other job from the list.
                 "config": spec.get("config"),
+                "notifications": spec.get("notifications"),
             }
         return jobs
+
+    @staticmethod
+    def notification_routes() -> dict[str, dict[str, dict[str, str]]]:
+        """Load strictly bounded logical-kind to Coconut Shell type routes."""
+
+        routes: dict[str, dict[str, dict[str, str]]] = {}
+        for job, spec in JobSupervisor.registry().items():
+            declared = spec.get("notifications")
+            if declared is None:
+                continue
+            if not isinstance(declared, dict) or len(declared) > 16:
+                continue
+            job_routes: dict[str, dict[str, str]] = {}
+            valid = True
+            for kind, route in declared.items():
+                if (
+                    not isinstance(kind, str)
+                    or re.fullmatch(r"^[a-z][a-z0-9_]{0,63}$", kind) is None
+                    or not isinstance(route, dict)
+                    or set(route) != {"type", "artifact"}
+                    or re.fullmatch(
+                        r"^streambot\.[a-z0-9_.]{1,100}$", str(route.get("type", ""))
+                    )
+                    is None
+                    or route.get("artifact") not in {"none", "optional", "required"}
+                ):
+                    valid = False
+                    break
+                job_routes[kind] = {
+                    "type": route["type"],
+                    "artifact": route["artifact"],
+                }
+            if valid and job_routes:
+                routes[job] = job_routes
+        return routes
 
     @staticmethod
     def config_schema(name: str) -> "ConfigSchema | None":
@@ -957,6 +1040,9 @@ class JobSupervisor:
             child_env = dict(os.environ)
             child_env.setdefault("STREAMBOT_HOME", str(PROJECT_ROOT))
             child_env.setdefault("STREAMBOT_JOBS_DIR", str(JOBS_ROOT))
+            child_env.setdefault(
+                "STREAMBOT_NOTIFICATION_DIR", str(LOG_DIR / "notifications")
+            )
             self._processes[name] = subprocess.Popen(
                 command,
                 cwd=str(jobs_repo_root),
@@ -1009,6 +1095,13 @@ class JobSupervisor:
             self._flow_readers[name] = reader
         return reader
 
+    def collect_events(self) -> None:
+        """Ingest every registered job log into the shared durable store."""
+
+        with self._lock:
+            for name in self.registry():
+                self._flow_reader(name).poll()
+
     def history(
         self, range_seconds: int | None = None, end: int | None = None
     ) -> dict[str, Any]:
@@ -1045,9 +1138,9 @@ class JobSupervisor:
                     last_log = lines[-1][-160:] if lines else ""
                 metrics = None
                 events: list[dict[str, Any]] = []
+                reader = self._flow_reader(name)
+                reader.poll()
                 if running:
-                    reader = self._flow_reader(name)
-                    reader.poll()
                     metrics = reader.metrics()
                     events = reader.recent_events()
                 configurable = False
@@ -1266,6 +1359,7 @@ class ConsoleState:
         self.jobs = jobs or JobSupervisor()
         self.supervisor = supervisor
         self.publisher: HourlyNotificationPublisher | None = None
+        self.event_publisher: EventNotificationPublisher | None = None
         self.events = SystemEvents()
         self._bonjour: bool | None = None
         self._bonjour_checked_at = 0.0
@@ -1454,6 +1548,11 @@ class ConsoleState:
             "notification_publisher": (
                 self.publisher.status()
                 if self.publisher is not None
+                else {"state": "unavailable"}
+            ),
+            "notification_event_publisher": (
+                self.event_publisher.status()
+                if self.event_publisher is not None
                 else {"state": "unavailable"}
             ),
         }
@@ -1799,9 +1898,22 @@ def main() -> int:
         console.notification_snapshot,
         console.capture_notification_snapshot,
     )
+    event_publisher = EventNotificationPublisher(
+        publisher.config,
+        console.jobs.metrics.events_after,
+        console.jobs.metrics.latest_event_rowid,
+        console.jobs.metrics.notification_cursor,
+        console.jobs.metrics.set_notification_cursor,
+        console.jobs.notification_routes,
+        LOG_DIR / "notifications",
+    )
+    publisher.include_health(event_publisher.status)
     console.publisher = publisher
+    console.event_publisher = event_publisher
+    console.jobs.collect_events()
     console.start_watching()
     publisher.start()
+    event_publisher.start()
 
     handler = type("BoundHandler", (Handler,), {"console": console})
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
@@ -1812,6 +1924,7 @@ def main() -> int:
         # re-adopts both (worker via its IPC socket, jobs via process scan),
         # and stopping them stays an explicit UI/API action.
         publisher.stop()
+        event_publisher.stop()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, _shutdown)

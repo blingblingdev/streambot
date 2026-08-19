@@ -226,6 +226,34 @@ class EventStoreTests(unittest.TestCase):
         self.assertEqual([e["i"] for e in held], [e["i"] for e in again])
         self.assertEqual([e["event"] for e in again], ["start", "click"])
 
+    def test_notification_cursor_and_order_survive_reopen(self) -> None:
+        path = self._log(
+            "a",
+            [
+                {"t": NOW - 2, "event": "doing", "what": "work"},
+                {
+                    "t": NOW - 1,
+                    "event": "notification",
+                    "notification_kind": "completed",
+                    "event_id": "a" * 32,
+                    "data": {"count": 1},
+                },
+            ],
+        )
+        server.FlowLogReader(path, store=self.store, job="a").poll()
+        self.assertEqual(self.store.latest_event_rowid(), 2)
+        events = self.store.events_after(0, 10)
+        self.assertEqual([event["rowid"] for event in events], [1, 2])
+        self.assertEqual(events[1]["job"], "a")
+        self.assertEqual(events[1]["notification_kind"], "completed")
+        self.assertIsNone(self.store.notification_cursor())
+        self.store.set_notification_cursor(2)
+
+        database = self.store.path
+        self.store.close()
+        self.store = server.MetricsStore(database)
+        self.assertEqual(self.store.notification_cursor(), 2)
+
     def test_a_restarted_session_appends_instead_of_overwriting(self) -> None:
         path = self._log("a", [
             {"t": NOW - 600, "event": "start"},

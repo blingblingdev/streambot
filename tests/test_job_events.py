@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
@@ -76,6 +77,60 @@ class JobEventsTests(unittest.TestCase):
         events = JobEvents("j", jobs_dir=Path("/proc/nonexistent-and-unwritable"))
         events.start()
         events.doing("still working")
+
+    def test_notification_event_is_bounded_and_strict(self) -> None:
+        with TemporaryDirectory() as directory:
+            events = JobEvents("j", jobs_dir=Path(directory))
+            event_id = events.notification("completed", {"count": 3})
+            self.assertIsNotNone(event_id)
+            row = self._read(events.path)[0]
+            self.assertEqual(row["event"], "notification")
+            self.assertEqual(row["notification_kind"], "completed")
+            self.assertEqual(row["event_id"], event_id)
+            self.assertEqual(row["data"], {"count": 3})
+            self.assertIsNone(events.notification("Invalid.Kind", {}))
+            self.assertIsNone(events.notification("completed", {"raw": b"bytes"}))
+            self.assertIsNone(
+                events.notification("completed", {"value": "x" * (20 * 1024)})
+            )
+
+    def test_artifact_spool_is_private_and_ack_requires_terminal_success(self) -> None:
+        with TemporaryDirectory() as directory:
+            previous = os.environ.get("STREAMBOT_NOTIFICATION_DIR")
+            os.environ["STREAMBOT_NOTIFICATION_DIR"] = directory
+            try:
+                events = JobEvents("j", jobs_dir=Path(directory) / "jobs")
+                artifact_id = events.store_notification_artifact(b"jpeg", "image/jpeg")
+                self.assertIsNotNone(artifact_id)
+                artifact_dir = Path(directory) / "artifacts"
+                metadata = json.loads(
+                    (artifact_dir / f"{artifact_id}.json").read_text(encoding="utf-8")
+                )
+                data_path = artifact_dir / metadata["filename"]
+                self.assertEqual(data_path.read_bytes(), b"jpeg")
+                self.assertEqual(data_path.stat().st_mode & 0o777, 0o600)
+
+                event_id = events.notification(
+                    "completed", {"count": 3}, artifact_id=artifact_id
+                )
+                self.assertFalse(events.notification_confirmed(event_id or ""))
+                ack_dir = Path(directory) / "acks"
+                ack_dir.mkdir(mode=0o700)
+                (ack_dir / f"{event_id}.json").write_text(
+                    json.dumps({"event_id": event_id, "state": "failed"}),
+                    encoding="utf-8",
+                )
+                self.assertFalse(events.notification_confirmed(event_id or ""))
+                (ack_dir / f"{event_id}.json").write_text(
+                    json.dumps({"event_id": event_id, "state": "succeeded"}),
+                    encoding="utf-8",
+                )
+                self.assertTrue(events.notification_confirmed(event_id or ""))
+            finally:
+                if previous is None:
+                    os.environ.pop("STREAMBOT_NOTIFICATION_DIR", None)
+                else:
+                    os.environ["STREAMBOT_NOTIFICATION_DIR"] = previous
 
 
 if __name__ == "__main__":

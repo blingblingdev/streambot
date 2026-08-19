@@ -19,6 +19,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 TYPE_KEY = "streambot.hourly_status"
@@ -54,7 +55,9 @@ class PublisherConfig:
 
     @classmethod
     def from_environment(cls) -> "PublisherConfig":
-        enabled = _environment_flag("STREAMBOT_HOURLY_PUBLISHER_ENABLED", False)
+        enabled = _environment_flag(
+            "STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED", False
+        )
         include_snapshot = _environment_flag(
             "STREAMBOT_HOURLY_PUBLISHER_INCLUDE_SNAPSHOT", True
         )
@@ -190,17 +193,43 @@ class CoconutShellClient:
         idempotency_key: str,
         media_ids: list[str],
     ) -> dict[str, Any]:
+        return self.submit_event(
+            TYPE_KEY,
+            idempotency_key,
+            snapshot.collected_at,
+            snapshot.payload(),
+            media_ids,
+        )
+
+    def submit_event(
+        self,
+        type_key: str,
+        idempotency_key: str,
+        occurred_at: datetime,
+        data: dict[str, Any],
+        media_ids: list[str],
+    ) -> dict[str, Any]:
+        if (
+            not re.fullmatch(r"^streambot\.[a-z0-9_.]{1,100}$", type_key)
+            or not _valid_identifier(idempotency_key)
+            or not isinstance(data, dict)
+            or len(media_ids) > 4
+            or any(not _valid_identifier(media_id) for media_id in media_ids)
+        ):
+            raise CoconutShellError("notification event is invalid")
         body = json.dumps(
             {
-                "type": TYPE_KEY,
+                "type": type_key,
                 "idempotency_key": idempotency_key,
-                "occurred_at": _rfc3339(snapshot.collected_at),
+                "occurred_at": _rfc3339(occurred_at),
                 "renderer_version": 1,
-                "data": snapshot.payload(),
+                "data": data,
                 "media_ids": media_ids,
             },
             separators=(",", ":"),
         ).encode("utf-8")
+        if len(body) > 64 * 1024:
+            raise CoconutShellError("notification event is too large")
         return self._request(
             "POST", "/api/v1/notifications", body, "application/json; charset=utf-8"
         )
@@ -305,6 +334,7 @@ class HourlyNotificationPublisher:
         self._capture_provider = capture_provider
         self._client = client or (CoconutShellClient(config) if config.enabled else None)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._health_provider: Callable[[], dict[str, Any]] | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
@@ -345,6 +375,11 @@ class HourlyNotificationPublisher:
     def status(self) -> dict[str, Any]:
         with self._status_lock:
             return dict(self._status)
+
+    def include_health(self, provider: Callable[[], dict[str, Any]]) -> None:
+        """Include another publisher lane in the shared platform heartbeat."""
+
+        self._health_provider = provider
 
     def run_once(self, collected_at: datetime | None = None) -> dict[str, Any]:
         now = (collected_at or self._clock()).astimezone(timezone.utc)
@@ -456,6 +491,17 @@ class HourlyNotificationPublisher:
         if self._client is None:
             return
         status = self.status()
+        if self._health_provider is not None:
+            peer = self._health_provider()
+            if peer.get("state") not in {
+                "ready",
+                "succeeded",
+                "suppressed",
+                "ignored",
+                "disabled",
+            }:
+                status["state"] = "degraded"
+                status["reason"] = str(peer.get("reason") or "")[:160]
         now = self._clock().astimezone(timezone.utc)
         try:
             self._client.heartbeat(status)
@@ -486,6 +532,280 @@ class HourlyNotificationPublisher:
         with self._status_lock:
             value["heartbeat_state"] = self._status.get("heartbeat_state")
             value["heartbeat_at"] = self._status.get("heartbeat_at")
+            self._status = value
+        return dict(value)
+
+
+class EventNotificationPublisher:
+    """Deliver declarative job events collected by the Streambot console."""
+
+    BATCH_SIZE = 100
+
+    def __init__(
+        self,
+        config: PublisherConfig,
+        event_provider: Callable[[int, int], list[dict[str, Any]]],
+        latest_event_id: Callable[[], int],
+        cursor_provider: Callable[[], int | None],
+        cursor_writer: Callable[[int], None],
+        routes_provider: Callable[[], dict[str, dict[str, dict[str, str]]]],
+        notification_dir: Path,
+        *,
+        client: CoconutShellClient | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.config = config
+        self._event_provider = event_provider
+        self._latest_event_id = latest_event_id
+        self._cursor_provider = cursor_provider
+        self._cursor_writer = cursor_writer
+        self._routes_provider = routes_provider
+        self._notification_dir = Path(notification_dir)
+        self._client = client or (CoconutShellClient(config) if config.enabled else None)
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._status_lock = threading.Lock()
+        self._status: dict[str, Any] = {
+            "state": "disabled" if not config.enabled else "ready",
+            "last_event_id": None,
+            "last_notification_id": None,
+            "reason": "Publisher is disabled." if not config.enabled else "",
+        }
+
+    def start(self) -> None:
+        if not self.config.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="coconut-shell-event-publisher", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=5.0)
+
+    def status(self) -> dict[str, Any]:
+        with self._status_lock:
+            return dict(self._status)
+
+    def run_once(self) -> dict[str, Any]:
+        if not self.config.enabled or self._client is None:
+            return self._record("disabled", reason="Publisher is disabled.")
+        cursor = self._cursor_provider()
+        if cursor is None:
+            cursor = self._latest_event_id()
+            self._cursor_writer(cursor)
+            return self._record(
+                "ready",
+                event_id=cursor,
+                reason="Initialized without historical event backfill.",
+            )
+        routes = self._routes_provider()
+        events = self._event_provider(cursor, self.BATCH_SIZE)
+        if not events:
+            return self._record("ready", event_id=cursor)
+        for event in events:
+            rowid = event.get("rowid")
+            if not isinstance(rowid, int) or rowid <= cursor:
+                return self._record(
+                    "degraded", event_id=cursor, reason="Event cursor input is invalid."
+                )
+            if event.get("event") != "notification":
+                self._cursor_writer(rowid)
+                cursor = rowid
+                continue
+            outcome = self._deliver_event(event, routes)
+            if outcome[0] in {"succeeded", "suppressed", "ignored"}:
+                self._cursor_writer(rowid)
+                cursor = rowid
+                self._record(
+                    outcome[0],
+                    event_id=rowid,
+                    notification_id=outcome[1],
+                    reason=outcome[2],
+                )
+                continue
+            return self._record(
+                outcome[0],
+                event_id=rowid,
+                notification_id=outcome[1],
+                reason=outcome[2],
+            )
+        return self.status()
+
+    def _deliver_event(
+        self,
+        event: dict[str, Any],
+        routes: dict[str, dict[str, dict[str, str]]],
+    ) -> tuple[str, str | None, str]:
+        job = event.get("job")
+        kind = event.get("notification_kind")
+        event_id = event.get("event_id")
+        data = event.get("data")
+        occurred = event.get("t")
+        route = (
+            routes.get(job, {}).get(kind)
+            if isinstance(job, str) and isinstance(kind, str)
+            else None
+        )
+        if (
+            route is None
+            or re.fullmatch(r"^[0-9a-f]{32}$", event_id or "") is None
+            or not isinstance(data, dict)
+            or not isinstance(occurred, (int, float))
+        ):
+            return "ignored", None, "Invalid or unmapped notification event was skipped."
+        media_ids: list[str] = []
+        artifact_id = event.get("artifact_id")
+        artifact_policy = route["artifact"]
+        artifact_paths: tuple[Path, Path] | None = None
+        if artifact_id is not None:
+            if artifact_policy == "none":
+                return "ignored", None, "Unexpected notification artifact was skipped."
+            try:
+                contents, content_type, artifact_paths = self._load_artifact(artifact_id)
+                media_ids.append(self._client.upload_media(contents, content_type))
+            except CoconutShellError:
+                return "degraded", None, "Notification artifact was unavailable."
+        elif artifact_policy == "required":
+            return "degraded", None, "Required notification artifact was unavailable."
+        result: dict[str, Any] | None = None
+        for attempt in range(self.config.submit_attempts):
+            try:
+                result = self._client.submit_event(
+                    route["type"],
+                    event_id,
+                    datetime.fromtimestamp(float(occurred), timezone.utc),
+                    data,
+                    media_ids,
+                )
+                break
+            except (CoconutShellError, OSError, OverflowError, ValueError):
+                if attempt + 1 == self.config.submit_attempts:
+                    return (
+                        "degraded",
+                        None,
+                        "Coconut Shell did not confirm notification acceptance.",
+                    )
+                if self._stop.wait(min(2**attempt, 4)):
+                    return "stopped", None, "Publisher stopped during retry."
+        assert result is not None
+        notification_id = result.get("id")
+        state = result.get("state")
+        if not _valid_identifier(notification_id) or not isinstance(state, str):
+            return "degraded", None, "Coconut Shell acceptance response was invalid."
+        deadline = time.monotonic() + self.config.terminal_timeout
+        while state not in TERMINAL_STATES and time.monotonic() < deadline:
+            if self._stop.wait(self.config.poll_interval):
+                return (
+                    "stopped",
+                    notification_id,
+                    "Publisher stopped while awaiting terminal status.",
+                )
+            try:
+                result = self._client.status(notification_id)
+            except CoconutShellError:
+                continue
+            state = result.get("state")
+            if not isinstance(state, str):
+                state = ""
+        if state in {"succeeded", "suppressed"}:
+            self._write_ack(event_id, state, notification_id)
+            if artifact_paths is not None:
+                for path in artifact_paths:
+                    path.unlink(missing_ok=True)
+            return state, notification_id, ""
+        if state in {"failed", "ambiguous"}:
+            return (
+                state,
+                notification_id,
+                "Coconut Shell reported a terminal delivery failure.",
+            )
+        return "degraded", notification_id, "Coconut Shell status polling timed out."
+
+    def _load_artifact(self, artifact_id: str) -> tuple[bytes, str, tuple[Path, Path]]:
+        if re.fullmatch(r"^[0-9a-f]{32}$", artifact_id or "") is None:
+            raise CoconutShellError("notification artifact is invalid")
+        artifact_dir = self._notification_dir / "artifacts"
+        metadata_path = artifact_dir / f"{artifact_id}.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            filename = metadata["filename"]
+            content_type = metadata["content_type"]
+            data_path = artifact_dir / filename
+            if (
+                not isinstance(filename, str)
+                or filename not in {f"{artifact_id}.jpg", f"{artifact_id}.png"}
+                or metadata.get("id") != artifact_id
+                or content_type not in {"image/jpeg", "image/png"}
+                or data_path.is_symlink()
+                or metadata_path.is_symlink()
+                or data_path.resolve().parent != artifact_dir.resolve()
+            ):
+                raise ValueError
+            contents = data_path.read_bytes()
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise CoconutShellError("notification artifact is unavailable") from None
+        if not contents or len(contents) > MAX_MEDIA_BYTES:
+            raise CoconutShellError("notification artifact is invalid")
+        return contents, content_type, (data_path, metadata_path)
+
+    def _write_ack(self, event_id: str, state: str, notification_id: str) -> None:
+        ack_dir = self._notification_dir / "acks"
+        ack_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(ack_dir, 0o700)
+        horizon = time.time() - 30 * 24 * 3600
+        for held in ack_dir.glob("[0-9a-f]" * 32 + ".json"):
+            try:
+                if held.stat().st_mtime < horizon:
+                    held.unlink(missing_ok=True)
+            except OSError:
+                continue
+        path = ack_dir / f"{event_id}.json"
+        temporary = ack_dir / f".{event_id}.tmp"
+        temporary.write_text(
+            json.dumps(
+                {
+                    "event_id": event_id,
+                    "state": state,
+                    "notification_id": notification_id,
+                    "confirmed_at": _rfc3339(self._clock()),
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.run_once()
+            except Exception:
+                self._record(
+                    "degraded", reason="Notification event publisher failed safely."
+                )
+            if self._stop.wait(1.0):
+                return
+
+    def _record(
+        self,
+        state: str,
+        *,
+        event_id: int | None = None,
+        notification_id: str | None = None,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        value = {
+            "state": state,
+            "last_event_id": event_id,
+            "last_notification_id": notification_id,
+            "reason": reason,
+        }
+        with self._status_lock:
             self._status = value
         return dict(value)
 

@@ -140,6 +140,35 @@ class ConfigEndpointTests(unittest.TestCase):
             rows = {row["name"]: row for row in self.jobs.status()}
         self.assertTrue(rows["demo"]["configurable"])
 
+    def test_notification_routes_are_strict_and_declarative(self) -> None:
+        declared = registry()
+        declared["demo"]["notifications"] = {
+            "completed": {
+                "type": "streambot.demo.completed",
+                "artifact": "optional",
+            }
+        }
+        with mock.patch.object(
+            server.JobSupervisor, "registry", staticmethod(lambda: declared)
+        ):
+            self.assertEqual(
+                server.JobSupervisor.notification_routes(),
+                {
+                    "demo": {
+                        "completed": {
+                            "type": "streambot.demo.completed",
+                            "artifact": "optional",
+                        }
+                    }
+                },
+            )
+
+        declared["demo"]["notifications"]["completed"]["extra"] = "unsafe"
+        with mock.patch.object(
+            server.JobSupervisor, "registry", staticmethod(lambda: declared)
+        ):
+            self.assertEqual(server.JobSupervisor.notification_routes(), {})
+
 
 class ResolveMetricTests(unittest.TestCase):
     def test_analysis_time_reaches_the_panel(self) -> None:
