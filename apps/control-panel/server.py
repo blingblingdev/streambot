@@ -914,6 +914,7 @@ class JobSupervisor:
                 continue
             jobs[name] = {
                 "name": name,
+                "directory": manifest.parent.name,
                 "title": str(spec.get("title", name)),
                 "description": str(spec.get("description", "")),
                 "runner": [str(part) for part in runner],
@@ -1089,8 +1090,12 @@ class JobSupervisor:
     def _flow_reader(self, name: str) -> FlowLogReader:
         reader = self._flow_readers.get(name)
         if reader is None:
+            spec = self.registry().get(name) or {}
+            directory = str(spec.get("directory") or name)
             reader = FlowLogReader(
-                JOBS_ROOT / name / "flow-log.jsonl", store=self.metrics, job=name
+                JOBS_ROOT / directory / "flow-log.jsonl",
+                store=self.metrics,
+                job=name,
             )
             self._flow_readers[name] = reader
         return reader

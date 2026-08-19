@@ -169,6 +169,35 @@ class ConfigEndpointTests(unittest.TestCase):
         ):
             self.assertEqual(server.JobSupervisor.notification_routes(), {})
 
+    def test_manifest_directory_may_differ_from_logical_job_name(self) -> None:
+        folder = self.root / "job-folder"
+        folder.mkdir()
+        (folder / "job.json").write_text(
+            json.dumps(
+                {
+                    "name": "logical-job",
+                    "title": "Logical job",
+                    "runner": ["jobs/job-folder/runner.py"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (folder / "flow-log.jsonl").write_text(
+            json.dumps({"event": "start", "t": int(time.time())}) + "\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(server, "JOBS_ROOT", self.root):
+            jobs = server.JobSupervisor(
+                server.MetricsStore(self.root / "directory-metrics.db")
+            )
+            try:
+                jobs.collect_events()
+                self.assertEqual(jobs.registry()["logical-job"]["directory"], "job-folder")
+                self.assertEqual(jobs.metrics.latest_event_rowid(), 1)
+                self.assertEqual(jobs.metrics.events_after(0, 1)[0]["job"], "logical-job")
+            finally:
+                jobs.metrics.close()
+
 
 class ResolveMetricTests(unittest.TestCase):
     def test_analysis_time_reaches_the_panel(self) -> None:
