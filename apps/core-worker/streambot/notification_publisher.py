@@ -11,6 +11,7 @@ import json
 import os
 import re
 import ssl
+import stat
 import threading
 import time
 import urllib.error
@@ -25,6 +26,7 @@ from typing import Any, Callable
 TYPE_KEY = "streambot.hourly_status"
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
+MAX_ARTIFACT_METADATA_BYTES = 16 * 1024
 TERMINAL_STATES = {"succeeded", "suppressed", "failed", "ambiguous"}
 SOURCE_TOKEN_PATTERN = re.compile(r"^cshp_v1_[A-Za-z0-9_-]{43}$")
 
@@ -661,6 +663,7 @@ class EventNotificationPublisher:
         artifact_id = event.get("artifact_id")
         artifact_policy = route["artifact"]
         artifact_paths: tuple[Path, Path] | None = None
+        artifact_reason = ""
         if artifact_id is not None:
             if artifact_policy == "none":
                 return "ignored", None, "Unexpected notification artifact was skipped."
@@ -668,7 +671,9 @@ class EventNotificationPublisher:
                 contents, content_type, artifact_paths = self._load_artifact(artifact_id)
                 media_ids.append(self._client.upload_media(contents, content_type))
             except CoconutShellError:
-                return "degraded", None, "Notification artifact was unavailable."
+                if artifact_policy == "required":
+                    return "degraded", None, "Required notification artifact was unavailable."
+                artifact_reason = "Optional notification artifact was unavailable."
         elif artifact_policy == "required":
             return "degraded", None, "Required notification artifact was unavailable."
         result: dict[str, Any] | None = None
@@ -716,7 +721,7 @@ class EventNotificationPublisher:
             if artifact_paths is not None:
                 for path in artifact_paths:
                     path.unlink(missing_ok=True)
-            return state, notification_id, ""
+            return state, notification_id, artifact_reason
         if state in {"failed", "ambiguous"}:
             return (
                 state,
@@ -731,7 +736,16 @@ class EventNotificationPublisher:
         artifact_dir = self._notification_dir / "artifacts"
         metadata_path = artifact_dir / f"{artifact_id}.json"
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            artifact_directory = artifact_dir.lstat()
+            if not stat.S_ISDIR(artifact_directory.st_mode) or stat.S_ISLNK(
+                artifact_directory.st_mode
+            ):
+                raise ValueError
+            metadata = json.loads(
+                _read_regular_file(
+                    metadata_path, MAX_ARTIFACT_METADATA_BYTES
+                ).decode("utf-8")
+            )
             filename = metadata["filename"]
             content_type = metadata["content_type"]
             data_path = artifact_dir / filename
@@ -740,15 +754,19 @@ class EventNotificationPublisher:
                 or filename not in {f"{artifact_id}.jpg", f"{artifact_id}.png"}
                 or metadata.get("id") != artifact_id
                 or content_type not in {"image/jpeg", "image/png"}
-                or data_path.is_symlink()
-                or metadata_path.is_symlink()
-                or data_path.resolve().parent != artifact_dir.resolve()
             ):
                 raise ValueError
-            contents = data_path.read_bytes()
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            contents = _read_regular_file(data_path, MAX_MEDIA_BYTES)
+        except (
+            OSError,
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
             raise CoconutShellError("notification artifact is unavailable") from None
-        if not contents or len(contents) > MAX_MEDIA_BYTES:
+        if not contents:
             raise CoconutShellError("notification artifact is invalid")
         return contents, content_type, (data_path, metadata_path)
 
@@ -864,3 +882,22 @@ def _rfc3339(value: datetime) -> str:
 
 def _hour_bucket(value: datetime) -> str:
     return "hour:" + value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H")
+
+
+def _read_regular_file(path: Path, limit: int) -> bytes:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if no_follow == 0:
+        raise OSError("no-follow file access is unavailable")
+    flags = os.O_RDONLY | no_follow
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0 or metadata.st_size > limit:
+            raise OSError("notification artifact is not a bounded regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            contents = source.read(limit + 1)
+        if not contents or len(contents) > limit:
+            raise OSError("notification artifact exceeds its bound")
+        return contents
+    finally:
+        os.close(descriptor)

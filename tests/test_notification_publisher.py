@@ -376,6 +376,146 @@ class EventPublisherTests(unittest.TestCase):
         self.assertEqual(ack["state"], "succeeded")
         self.assertEqual(client.submissions[0][0], "streambot.poly_bridge.completed")
 
+    def test_valid_optional_artifact_uploads_and_is_removed_after_success(self) -> None:
+        cursor = {"value": 0}
+        event_id = "b" * 32
+        event = {
+            "rowid": 1,
+            "job": "poly-bridge",
+            "event": "notification",
+            "notification_kind": "completed",
+            "event_id": event_id,
+            "artifact_id": event_id,
+            "data": {"placed_count": 8},
+            "t": int(NOW.timestamp()),
+        }
+        client = FakeClient()
+        with TemporaryDirectory() as directory:
+            notification_dir = Path(directory)
+            artifact_dir = notification_dir / "artifacts"
+            artifact_dir.mkdir()
+            data_path = artifact_dir / f"{event_id}.png"
+            metadata_path = artifact_dir / f"{event_id}.json"
+            data_path.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "id": event_id,
+                        "filename": data_path.name,
+                        "content_type": "image/png",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            publisher = EventNotificationPublisher(
+                self.config(),
+                lambda _after, _limit: [event],
+                lambda: 1,
+                lambda: cursor["value"],
+                lambda value: cursor.update(value=value),
+                lambda: {
+                    "poly-bridge": {
+                        "completed": {
+                            "type": "streambot.poly_bridge.completed",
+                            "artifact": "optional",
+                        }
+                    }
+                },
+                notification_dir,
+                client=client,
+                clock=lambda: NOW,
+            )
+            result = publisher.run_once()
+            self.assertFalse(data_path.exists())
+            self.assertFalse(metadata_path.exists())
+        self.assertEqual(result["state"], "succeeded")
+        self.assertEqual(cursor["value"], 1)
+        self.assertEqual(client.uploads, 1)
+        self.assertEqual(client.submissions[0][-1], ["media-1"])
+
+    def test_unsafe_optional_artifact_degrades_to_text_without_following_symlink(self) -> None:
+        cursor = {"value": 0}
+        event_id = "c" * 32
+        event = {
+            "rowid": 1,
+            "job": "poly-bridge",
+            "event": "notification",
+            "notification_kind": "completed",
+            "event_id": event_id,
+            "artifact_id": event_id,
+            "data": {"placed_count": 8},
+            "t": int(NOW.timestamp()),
+        }
+        client = FakeClient()
+        with TemporaryDirectory() as directory:
+            notification_dir = Path(directory)
+            artifact_dir = notification_dir / "artifacts"
+            artifact_dir.mkdir()
+            outside = notification_dir / "outside.json"
+            outside.write_text('{"private":"must not be read"}', encoding="utf-8")
+            (artifact_dir / f"{event_id}.json").symlink_to(outside)
+            publisher = EventNotificationPublisher(
+                self.config(),
+                lambda _after, _limit: [event],
+                lambda: 1,
+                lambda: cursor["value"],
+                lambda value: cursor.update(value=value),
+                lambda: {
+                    "poly-bridge": {
+                        "completed": {
+                            "type": "streambot.poly_bridge.completed",
+                            "artifact": "optional",
+                        }
+                    }
+                },
+                notification_dir,
+                client=client,
+            )
+            result = publisher.run_once()
+        self.assertEqual(result["state"], "succeeded")
+        self.assertIn("Optional", result["reason"])
+        self.assertEqual(cursor["value"], 1)
+        self.assertEqual(client.uploads, 0)
+        self.assertEqual(client.submissions[0][-1], [])
+
+    def test_missing_required_artifact_blocks_delivery_and_cursor(self) -> None:
+        cursor = {"value": 0}
+        event_id = "d" * 32
+        event = {
+            "rowid": 1,
+            "job": "pilot",
+            "event": "notification",
+            "notification_kind": "assistance_required",
+            "event_id": event_id,
+            "artifact_id": event_id,
+            "data": {"reason": "Operator input is required."},
+            "t": int(NOW.timestamp()),
+        }
+        client = FakeClient()
+        with TemporaryDirectory() as directory:
+            publisher = EventNotificationPublisher(
+                self.config(),
+                lambda _after, _limit: [event],
+                lambda: 1,
+                lambda: cursor["value"],
+                lambda value: cursor.update(value=value),
+                lambda: {
+                    "pilot": {
+                        "assistance_required": {
+                            "type": "streambot.pilot.assistance_required",
+                            "artifact": "required",
+                        }
+                    }
+                },
+                Path(directory),
+                client=client,
+            )
+            result = publisher.run_once()
+        self.assertEqual(result["state"], "degraded")
+        self.assertIn("Required", result["reason"])
+        self.assertEqual(cursor["value"], 0)
+        self.assertEqual(client.submissions, [])
+
     def test_unmapped_event_is_skipped_without_network(self) -> None:
         cursor = {"value": 0}
         client = FakeClient()
