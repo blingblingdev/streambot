@@ -78,12 +78,12 @@ class PublisherConfigTests(unittest.TestCase):
         values = {
             "STREAMBOT_HOURLY_PUBLISHER_ENABLED": "true",
             "COCONUT_SHELL_BASE_URL": "https://coconut.example.test",
-            "COCONUT_SHELL_STREAMBOT_SOURCE_TOKEN": "x" * 40,
+            "COCONUT_SHELL_STREAMBOT_SOURCE_TOKEN": "cshp_v1_" + "x" * 43,
         }
         with mock.patch.dict(os.environ, values, clear=True):
             config = PublisherConfig.from_environment()
         self.assertTrue(config.enabled)
-        self.assertNotIn("x" * 40, repr(config))
+        self.assertNotIn("x" * 43, repr(config))
 
         values["COCONUT_SHELL_BASE_URL"] = "http://remote.example.test"
         with mock.patch.dict(os.environ, values, clear=True):
@@ -137,12 +137,14 @@ class CoconutShellClientTests(unittest.TestCase):
                 return Response({"id": "00000000-0000-4000-8000-000000000001"}, 201)
             if request.full_url.endswith("/api/v1/notifications"):
                 return Response({"id": "event-1", "state": "pending"}, 202)
+            if request.full_url.endswith("/api/v1/sources/heartbeat"):
+                return Response({"status": "accepted"})
             return Response({"id": "event-1", "state": "succeeded"})
 
         self.config = PublisherConfig(
             enabled=True,
             base_url="https://coconut.example.test",
-            source_token="private-source-token-0000000000000000",
+            source_token="cshp_v1_" + "x" * 43,
         )
         self.client = CoconutShellClient(self.config, opener=opener)
 
@@ -150,6 +152,14 @@ class CoconutShellClientTests(unittest.TestCase):
         media_id = self.client.upload_media(b"\xff\xd8\xfffixture", "image/jpeg")
         accepted = self.client.submit(snapshot(), "hour:2026-08-19T10", [media_id])
         terminal = self.client.status(accepted["id"])
+        self.client.heartbeat(
+            {
+                "state": "succeeded",
+                "reason": "",
+                "last_bucket": "hour:2026-08-19T10",
+                "last_notification_id": "00000000-0000-4000-8000-000000000001",
+            }
+        )
         self.assertEqual(terminal["state"], "succeeded")
         notification_request = self.requests[1][0]
         payload = json.loads(notification_request.data)
@@ -158,8 +168,11 @@ class CoconutShellClientTests(unittest.TestCase):
         self.assertEqual(payload["media_ids"], [media_id])
         self.assertEqual(
             notification_request.get_header("Authorization"),
-            "Bearer private-source-token-0000000000000000",
+            "Bearer cshp_v1_" + "x" * 43,
         )
+        heartbeat_payload = json.loads(self.requests[3][0].data)
+        self.assertEqual(heartbeat_payload["state"], "healthy")
+        self.assertEqual(heartbeat_payload["last_outcome"], "succeeded")
 
     def test_client_errors_never_include_response_or_credentials(self) -> None:
         def failing(_request, timeout):
@@ -179,6 +192,7 @@ class FakeClient:
         self.uploads = 0
         self.submissions = []
         self.status_calls = 0
+        self.heartbeats = []
         self.fail_first_submit = fail_first_submit
 
     def upload_media(self, contents, content_type):
@@ -195,14 +209,18 @@ class FakeClient:
         self.status_calls += 1
         return {"id": notification_id, "state": "succeeded"}
 
+    def heartbeat(self, publisher_status):
+        self.heartbeats.append(dict(publisher_status))
+        return {"status": "accepted"}
+
 
 class HourlyPublisherTests(unittest.TestCase):
     def config(self) -> PublisherConfig:
         return PublisherConfig(
             enabled=True,
             base_url="https://coconut.example.test",
-            source_token="x" * 40,
-            poll_interval=0,
+            source_token="cshp_v1_" + "x" * 43,
+            poll_interval=0.001,
             terminal_timeout=1,
             submit_attempts=2,
         )
@@ -248,6 +266,18 @@ class HourlyPublisherTests(unittest.TestCase):
         self.assertEqual(result["state"], "succeeded")
         self.assertEqual(client.submissions[0][2], [])
         self.assertEqual(result["reason"], "Optional snapshot was unavailable.")
+
+    def test_publisher_reports_an_independent_heartbeat(self) -> None:
+        client = FakeClient()
+        publisher = HourlyNotificationPublisher(
+            self.config(), lambda _now: snapshot(False), lambda: None, client=client,
+            clock=lambda: NOW,
+        )
+        publisher.run_once(NOW)
+        publisher._send_heartbeat()
+        self.assertEqual(client.heartbeats[0]["state"], "idle_skip")
+        self.assertEqual(publisher.status()["heartbeat_state"], "confirmed")
+        self.assertEqual(publisher.status()["heartbeat_at"], "2026-08-19T10:23:45Z")
 
 
 if __name__ == "__main__":

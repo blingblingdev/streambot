@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import threading
 import time
@@ -24,6 +25,7 @@ TYPE_KEY = "streambot.hourly_status"
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
 TERMINAL_STATES = {"succeeded", "suppressed", "failed", "ambiguous"}
+SOURCE_TOKEN_PATTERN = re.compile(r"^cshp_v1_[A-Za-z0-9_-]{43}$")
 
 
 class PublisherConfigurationError(ValueError):
@@ -48,6 +50,7 @@ class PublisherConfig:
     terminal_timeout: float = 180.0
     poll_interval: float = 2.0
     submit_attempts: int = 3
+    heartbeat_interval: float = 30.0
 
     @classmethod
     def from_environment(cls) -> "PublisherConfig":
@@ -62,11 +65,7 @@ class PublisherConfig:
         if not enabled:
             return cls(enabled=False, include_snapshot=include_snapshot)
         _validate_base_url(base_url)
-        if (
-            len(source_token) < 32
-            or len(source_token) > 512
-            or any(character.isspace() or ord(character) < 32 for character in source_token)
-        ):
+        if not _valid_source_token(source_token):
             raise PublisherConfigurationError(
                 "Coconut Shell Streambot source token is missing or invalid"
             )
@@ -165,6 +164,8 @@ class CoconutShellClient:
         if not config.enabled:
             raise PublisherConfigurationError("publisher client requires enabled configuration")
         _validate_base_url(config.base_url)
+        if not _valid_source_token(config.source_token):
+            raise PublisherConfigurationError("publisher client source token is invalid")
         self._base_url = config.base_url.rstrip("/")
         self._source_token = config.source_token
         self._timeout = config.request_timeout
@@ -209,6 +210,30 @@ class CoconutShellClient:
             raise CoconutShellError("Coconut Shell notification identifier is invalid")
         path = "/api/v1/notifications/" + urllib.parse.quote(notification_id, safe="")
         return self._request("GET", path, None, None)
+
+    def heartbeat(self, publisher_status: dict[str, Any]) -> dict[str, Any]:
+        outcome = publisher_status.get("state")
+        state = (
+            "healthy"
+            if outcome in {"ready", "idle_skip", "succeeded", "suppressed"}
+            else "degraded"
+        )
+        body = json.dumps(
+            {
+                "state": state,
+                "reason": str(publisher_status.get("reason") or "")[:160],
+                "last_bucket": publisher_status.get("last_bucket") or "",
+                "last_notification_id": publisher_status.get("last_notification_id") or "",
+                "last_outcome": outcome or "degraded",
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return self._request(
+            "POST",
+            "/api/v1/sources/heartbeat",
+            body,
+            "application/json; charset=utf-8",
+        )
 
     def _request(
         self,
@@ -266,6 +291,15 @@ class HourlyNotificationPublisher:
         client: CoconutShellClient | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if config.enabled and (
+            config.request_timeout <= 0
+            or config.terminal_timeout <= 0
+            or config.poll_interval <= 0
+            or config.submit_attempts < 1
+            or config.submit_attempts > 10
+            or config.heartbeat_interval < 5
+        ):
+            raise PublisherConfigurationError("publisher timing configuration is invalid")
         self.config = config
         self._snapshot_provider = snapshot_provider
         self._capture_provider = capture_provider
@@ -273,6 +307,7 @@ class HourlyNotificationPublisher:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._heartbeat_thread: threading.Thread | None = None
         self._status_lock = threading.Lock()
         self._status: dict[str, Any] = {
             "state": "disabled" if not config.enabled else "ready",
@@ -280,6 +315,8 @@ class HourlyNotificationPublisher:
             "last_notification_id": None,
             "last_observed_at": None,
             "reason": "Publisher is disabled." if not config.enabled else "",
+            "heartbeat_state": "disabled" if not config.enabled else "pending",
+            "heartbeat_at": None,
         }
 
     def start(self) -> None:
@@ -288,13 +325,22 @@ class HourlyNotificationPublisher:
         self._thread = threading.Thread(
             target=self._run, name="coconut-shell-hourly-publisher", daemon=True
         )
+        self._heartbeat_thread = threading.Thread(
+            target=self._run_heartbeats,
+            name="coconut-shell-publisher-heartbeat",
+            daemon=True,
+        )
         self._thread.start()
+        self._heartbeat_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=5.0)
+        heartbeat_thread = self._heartbeat_thread
+        if heartbeat_thread is not None and heartbeat_thread is not threading.current_thread():
+            heartbeat_thread.join(timeout=5.0)
 
     def status(self) -> dict[str, Any]:
         with self._status_lock:
@@ -400,6 +446,27 @@ class HourlyNotificationPublisher:
                 return
             self.run_once(self._clock())
 
+    def _run_heartbeats(self) -> None:
+        while not self._stop.is_set():
+            self._send_heartbeat()
+            if self._stop.wait(self.config.heartbeat_interval):
+                return
+
+    def _send_heartbeat(self) -> None:
+        if self._client is None:
+            return
+        status = self.status()
+        now = self._clock().astimezone(timezone.utc)
+        try:
+            self._client.heartbeat(status)
+        except CoconutShellError:
+            heartbeat_state = "degraded"
+        else:
+            heartbeat_state = "confirmed"
+        with self._status_lock:
+            self._status["heartbeat_state"] = heartbeat_state
+            self._status["heartbeat_at"] = _rfc3339(now)
+
     def _record(
         self,
         state: str,
@@ -417,6 +484,8 @@ class HourlyNotificationPublisher:
             "reason": reason,
         }
         with self._status_lock:
+            value["heartbeat_state"] = self._status.get("heartbeat_state")
+            value["heartbeat_at"] = self._status.get("heartbeat_at")
             self._status = value
         return dict(value)
 
@@ -463,6 +532,10 @@ def _valid_text(value: Any, limit: int) -> bool:
 
 def _valid_identifier(value: Any) -> bool:
     return _valid_text(value, 128) and not any(character.isspace() for character in value)
+
+
+def _valid_source_token(value: str) -> bool:
+    return SOURCE_TOKEN_PATTERN.fullmatch(value) is not None
 
 
 def _rfc3339(value: datetime) -> str:
