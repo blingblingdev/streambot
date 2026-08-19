@@ -20,6 +20,7 @@ import json
 import os
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -47,6 +48,11 @@ from streambot.job_config import (  # noqa: E402
     read_values,
     values_path,
     write_values,
+)
+from streambot.notification_publisher import (  # noqa: E402
+    HourlyNotificationPublisher,
+    PublisherConfig,
+    StreambotNotificationSnapshot,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -1259,6 +1265,7 @@ class ConsoleState:
     def __init__(self, supervisor: WorkerSupervisor, jobs: "JobSupervisor | None" = None) -> None:
         self.jobs = jobs or JobSupervisor()
         self.supervisor = supervisor
+        self.publisher: HourlyNotificationPublisher | None = None
         self.events = SystemEvents()
         self._bonjour: bool | None = None
         self._bonjour_checked_at = 0.0
@@ -1267,6 +1274,7 @@ class ConsoleState:
         self._snapshot: dict[str, Any] | None = None
         self._snapshot_at = 0.0
         self._snapshot_lock = threading.Lock()
+        self._notification_capture_lock = threading.Lock()
 
     def start_watching(self) -> None:
         """Track turning points once a second, browser open or not.
@@ -1304,6 +1312,46 @@ class ConsoleState:
             if time.monotonic() - self._snapshot_at > max_age:
                 return None  # the watcher is wedged; compute inline instead
             return self._snapshot
+
+    def notification_snapshot(self, collected_at) -> StreambotNotificationSnapshot:
+        """Collect one bounded platform snapshot from existing status surfaces."""
+
+        return StreambotNotificationSnapshot.from_status(
+            self.status(), self.jobs.status(), collected_at
+        )
+
+    def capture_notification_snapshot(self) -> tuple[bytes, str] | None:
+        """Capture through the worker IPC snapshot command, if available."""
+
+        if not self.supervisor.socket_path.exists():
+            return None
+        with self._notification_capture_lock:
+            LOG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            output = LOG_DIR / "notification-snapshot.jpg"
+            try:
+                output.unlink(missing_ok=True)
+                result = send_control_command(
+                    self.supervisor.socket_path,
+                    "snapshot",
+                    arguments={"output": str(output)},
+                )
+                if not result.get("ok") or not output.exists():
+                    return None
+                metadata = output.lstat()
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_size <= 0
+                    or metadata.st_size > 8 * 1024 * 1024
+                ):
+                    return None
+                contents = output.read_bytes()
+                if not contents.startswith(b"\xff\xd8\xff"):
+                    return None
+                return contents, "image/jpeg"
+            except Exception:
+                return None
+            finally:
+                output.unlink(missing_ok=True)
 
     def bonjour(self) -> bool | None:
         """The last known answer, refreshed in the background.
@@ -1403,6 +1451,11 @@ class ConsoleState:
                 ],
             },
             "log_tail": supervisor.recent_log(),
+            "notification_publisher": (
+                self.publisher.status()
+                if self.publisher is not None
+                else {"state": "unavailable"}
+            ),
         }
 
 
@@ -1741,7 +1794,14 @@ def main() -> int:
     )
     supervisor = WorkerSupervisor(args.state_dir, socket_path)
     console = ConsoleState(supervisor)
+    publisher = HourlyNotificationPublisher(
+        PublisherConfig.from_environment(),
+        console.notification_snapshot,
+        console.capture_notification_snapshot,
+    )
+    console.publisher = publisher
     console.start_watching()
+    publisher.start()
 
     handler = type("BoundHandler", (Handler,), {"console": console})
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
@@ -1751,6 +1811,7 @@ def main() -> int:
         # take down the worker or a running job. A restarted console
         # re-adopts both (worker via its IPC socket, jobs via process scan),
         # and stopping them stays an explicit UI/API action.
+        publisher.stop()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, _shutdown)
