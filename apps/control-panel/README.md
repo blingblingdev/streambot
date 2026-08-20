@@ -111,15 +111,17 @@ Then open `http://127.0.0.1:8787/`. Options: `--port`, `--state-dir`
 
 The publisher is fail-closed and disabled by default. Configuration is injected
 into the control-panel process; it is not stored in this repository, a job
-manifest, a flow log, or the browser response. The only credential is a
-Streambot producer token scoped by Coconut Shell to `streambot.*` types. It is
-not a Feishu credential.
+manifest, a flow log, or the browser response. The local installation uses the
+same HMAC signing key as other trusted local producers. The key signs the full
+request body and is not a Feishu credential; the key ID keeps a future
+per-project-key migration possible without changing Streambot's message contract.
 
 ```text
 STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED=true
 STREAMBOT_HOURLY_PUBLISHER_INCLUDE_SNAPSHOT=true
-COCONUT_SHELL_BASE_URL=https://coconut-shell.example.test:8443
-COCONUT_SHELL_STREAMBOT_SOURCE_TOKEN=<external producer token>
+COCONUT_SHELL_BASE_URL=http://127.0.0.1:18081
+COCONUT_SHELL_GLOBAL_KEY=<installation signing key>
+COCONUT_SHELL_KEY_ID=local-global
 ```
 
 Use HTTPS except for a loopback-only test server. Enabling the process setting
@@ -133,7 +135,8 @@ Jobs request typed notifications through `JobEvents.notification`; they never
 load Coconut Shell or Feishu credentials. Each `job.json` maps its bounded
 logical event names to allowlisted `streambot.*` types and declares whether an
 image artifact is forbidden, optional, or required. Streambot collects those
-events in its existing SQLite event store, uploads private spooled evidence,
+events in its existing SQLite event store, builds the native Feishu card,
+passes private spooled evidence by signed local path for immediate snapshotting,
 waits for a terminal Coconut Shell result, and only then writes a local
 acknowledgement. The first enable initializes at the newest collected event,
 so historical flow logs are not replayed.

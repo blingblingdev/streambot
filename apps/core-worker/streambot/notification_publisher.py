@@ -8,10 +8,13 @@ processes, logs, manifests, or control sockets on its own.
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import re
 import ssl
 import stat
+import tempfile
 import threading
 import time
 import urllib.error
@@ -27,9 +30,9 @@ TYPE_KEY = "streambot.hourly_status"
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
 MAX_ARTIFACT_METADATA_BYTES = 16 * 1024
-MAX_MEDIA_STAGING_BYTES = 4 * 1024
 TERMINAL_STATES = {"succeeded", "suppressed", "failed", "ambiguous"}
-SOURCE_TOKEN_PATTERN = re.compile(r"^cshp_v1_[A-Za-z0-9_-]{43}$")
+KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+SOURCE_KEY = "streambot"
 
 
 class PublisherConfigurationError(ValueError):
@@ -48,7 +51,8 @@ class SnapshotError(ValueError):
 class PublisherConfig:
     enabled: bool = False
     base_url: str = ""
-    source_token: str = field(default="", repr=False)
+    global_key: str = field(default="", repr=False)
+    key_id: str = "local-global"
     include_snapshot: bool = True
     request_timeout: float = 10.0
     terminal_timeout: float = 180.0
@@ -64,21 +68,21 @@ class PublisherConfig:
         include_snapshot = _environment_flag(
             "STREAMBOT_HOURLY_PUBLISHER_INCLUDE_SNAPSHOT", True
         )
-        base_url = os.environ.get("COCONUT_SHELL_BASE_URL", "").strip()
-        source_token = os.environ.get(
-            "COCONUT_SHELL_STREAMBOT_SOURCE_TOKEN", ""
-        ).strip()
+        base_url = os.environ.get("COCONUT_SHELL_BASE_URL", "http://127.0.0.1:18081").strip()
+        global_key = os.environ.get("COCONUT_SHELL_GLOBAL_KEY", "").strip()
+        key_id = os.environ.get("COCONUT_SHELL_KEY_ID", "local-global").strip()
         if not enabled:
             return cls(enabled=False, include_snapshot=include_snapshot)
         _validate_base_url(base_url)
-        if not _valid_source_token(source_token):
+        if len(global_key.encode("utf-8")) < 32 or not KEY_ID_PATTERN.fullmatch(key_id):
             raise PublisherConfigurationError(
-                "Coconut Shell Streambot source token is missing or invalid"
+                "Coconut Shell signing configuration is missing or invalid"
             )
         return cls(
             enabled=True,
             base_url=base_url.rstrip("/"),
-            source_token=source_token,
+            global_key=global_key,
+            key_id=key_id,
             include_snapshot=include_snapshot,
         )
 
@@ -159,7 +163,7 @@ class StreambotNotificationSnapshot:
 
 
 class CoconutShellClient:
-    """Small authenticated client for the versioned producer API."""
+    """Small signed client for the local native-message API."""
 
     def __init__(
         self,
@@ -170,38 +174,26 @@ class CoconutShellClient:
         if not config.enabled:
             raise PublisherConfigurationError("publisher client requires enabled configuration")
         _validate_base_url(config.base_url)
-        if not _valid_source_token(config.source_token):
-            raise PublisherConfigurationError("publisher client source token is invalid")
+        if len(config.global_key.encode("utf-8")) < 32 or not KEY_ID_PATTERN.fullmatch(config.key_id):
+            raise PublisherConfigurationError("publisher client signing configuration is invalid")
         self._base_url = config.base_url.rstrip("/")
-        self._source_token = config.source_token
+        self._global_key = config.global_key.encode("utf-8")
+        self._key_id = config.key_id
         self._timeout = config.request_timeout
         self._opener = opener or urllib.request.urlopen
-
-    def upload_media(self, contents: bytes, content_type: str) -> str:
-        if (
-            not contents
-            or len(contents) > MAX_MEDIA_BYTES
-            or content_type not in {"image/jpeg", "image/png"}
-        ):
-            raise CoconutShellError("notification snapshot is invalid")
-        response = self._request("POST", "/api/v1/media", contents, content_type)
-        media_id = response.get("id")
-        if not _valid_identifier(media_id):
-            raise CoconutShellError("Coconut Shell media response is invalid")
-        return media_id
 
     def submit(
         self,
         snapshot: StreambotNotificationSnapshot,
         idempotency_key: str,
-        media_ids: list[str],
+        image_paths: list[Path],
     ) -> dict[str, Any]:
         return self.submit_event(
             TYPE_KEY,
             idempotency_key,
             snapshot.collected_at,
             snapshot.payload(),
-            media_ids,
+            image_paths,
         )
 
     def submit_event(
@@ -210,24 +202,34 @@ class CoconutShellClient:
         idempotency_key: str,
         occurred_at: datetime,
         data: dict[str, Any],
-        media_ids: list[str],
+        image_paths: list[Path],
     ) -> dict[str, Any]:
         if (
             not re.fullmatch(r"^streambot\.[a-z0-9_.]{1,100}$", type_key)
             or not _valid_identifier(idempotency_key)
             or not isinstance(data, dict)
-            or len(media_ids) > 4
-            or any(not _valid_identifier(media_id) for media_id in media_ids)
+            or len(image_paths) > 4
         ):
             raise CoconutShellError("notification event is invalid")
+        occurred_at = occurred_at.astimezone(timezone.utc)
+        message, title, summary = _message_for(type_key, data, bool(image_paths))
+        images = {
+            f"image_{index + 1}": _image_descriptor(path)
+            for index, path in enumerate(image_paths)
+        }
+        if images:
+            message = _attach_images(message, tuple(images))
         body = json.dumps(
             {
+                "contract": "native-feishu-v1",
+                "source": SOURCE_KEY,
                 "type": type_key,
                 "idempotency_key": idempotency_key,
                 "occurred_at": _rfc3339(occurred_at),
-                "renderer_version": 1,
-                "data": data,
-                "media_ids": media_ids,
+                "audit": {"title": title, "summary": summary},
+                "message": message,
+                "images": images,
+                "tasks": [],
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -243,29 +245,8 @@ class CoconutShellClient:
         path = "/api/v1/notifications/" + urllib.parse.quote(notification_id, safe="")
         return self._request("GET", path, None, None)
 
-    def heartbeat(self, publisher_status: dict[str, Any]) -> dict[str, Any]:
-        outcome = publisher_status.get("state")
-        state = (
-            "healthy"
-            if outcome in {"ready", "idle_skip", "succeeded", "suppressed"}
-            else "degraded"
-        )
-        body = json.dumps(
-            {
-                "state": state,
-                "reason": str(publisher_status.get("reason") or "")[:160],
-                "last_bucket": publisher_status.get("last_bucket") or "",
-                "last_notification_id": publisher_status.get("last_notification_id") or "",
-                "last_outcome": outcome or "degraded",
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return self._request(
-            "POST",
-            "/api/v1/sources/heartbeat",
-            body,
-            "application/json; charset=utf-8",
-        )
+    def heartbeat(self, _publisher_status: dict[str, Any]) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/healthz", None, None)
 
     def _request(
         self,
@@ -274,14 +255,20 @@ class CoconutShellClient:
         body: bytes | None,
         content_type: str | None,
     ) -> dict[str, Any]:
+        encoded_body = body or b""
+        timestamp = int(time.time())
+        nonce = str(uuid.uuid4())
+        signature = _sign_request(self._global_key, method, path, timestamp, nonce, encoded_body)
         request = urllib.request.Request(
             self._base_url + path,
             data=body,
             method=method,
             headers={
                 "Accept": "application/json",
-                "Authorization": "Bearer " + self._source_token,
-                "X-Request-ID": str(uuid.uuid4()),
+                "X-Coconut-Key-Id": self._key_id,
+                "X-Coconut-Timestamp": str(timestamp),
+                "X-Coconut-Nonce": nonce,
+                "X-Coconut-Signature": signature,
             },
         )
         if content_type:
@@ -400,24 +387,27 @@ class HourlyNotificationPublisher:
                 "idle_skip", bucket, now, reason="No registered job is running."
             )
 
-        media_ids: list[str] = []
+        image_paths: list[Path] = []
+        temporary_image: Path | None = None
         attachment_reason = ""
         if self.config.include_snapshot:
             try:
                 captured = self._capture_provider()
                 if captured is not None:
                     contents, content_type = captured
-                    media_ids.append(self._client.upload_media(contents, content_type))
+                    temporary_image = _write_temporary_image(contents, content_type)
+                    image_paths.append(temporary_image)
             except Exception:
                 attachment_reason = "Optional snapshot was unavailable."
 
         result: dict[str, Any] | None = None
         for attempt in range(self.config.submit_attempts):
             try:
-                result = self._client.submit(snapshot, bucket, media_ids)
+                result = self._client.submit(snapshot, bucket, image_paths)
                 break
             except CoconutShellError:
                 if attempt + 1 == self.config.submit_attempts:
+                    _unlink_optional(temporary_image)
                     return self._record(
                         "degraded",
                         bucket,
@@ -425,9 +415,11 @@ class HourlyNotificationPublisher:
                         reason="Coconut Shell did not confirm notification acceptance.",
                     )
                 if self._stop.wait(min(2**attempt, 4)):
+                    _unlink_optional(temporary_image)
                     return self._record(
                         "stopped", bucket, now, reason="Publisher stopped during retry."
                     )
+        _unlink_optional(temporary_image)
         assert result is not None
         notification_id = result.get("id")
         state = result.get("state")
@@ -660,7 +652,7 @@ class EventNotificationPublisher:
             or not isinstance(occurred, (int, float))
         ):
             return "ignored", None, "Invalid or unmapped notification event was skipped."
-        media_ids: list[str] = []
+        image_paths: list[Path] = []
         artifact_id = event.get("artifact_id")
         artifact_policy = route["artifact"]
         artifact_paths: tuple[Path, ...] | None = None
@@ -669,32 +661,14 @@ class EventNotificationPublisher:
             if artifact_policy == "none":
                 return "ignored", None, "Unexpected notification artifact was skipped."
             try:
-                staged_media_id = self._load_staged_media(event_id, artifact_id)
+                _contents, _content_type, loaded_paths = self._load_artifact(artifact_id)
             except CoconutShellError:
-                return "degraded", None, "Notification media staging is invalid."
-            if staged_media_id is not None:
-                media_ids.append(staged_media_id)
-                artifact_paths = self._artifact_paths(artifact_id)
+                if artifact_policy == "required":
+                    return "degraded", None, "Required notification artifact was unavailable."
+                artifact_reason = "Optional notification artifact was unavailable."
             else:
-                try:
-                    contents, content_type, artifact_paths = self._load_artifact(artifact_id)
-                except CoconutShellError:
-                    if artifact_policy == "required":
-                        return "degraded", None, "Required notification artifact was unavailable."
-                    artifact_reason = "Optional notification artifact was unavailable."
-                else:
-                    try:
-                        media_id = self._client.upload_media(contents, content_type)
-                    except CoconutShellError:
-                        if artifact_policy == "required":
-                            return "degraded", None, "Required notification artifact was unavailable."
-                        artifact_reason = "Optional notification artifact was unavailable."
-                    else:
-                        try:
-                            self._write_staged_media(event_id, artifact_id, media_id)
-                        except CoconutShellError:
-                            return "degraded", None, "Notification media staging failed."
-                        media_ids.append(media_id)
+                artifact_paths = loaded_paths
+                image_paths.append(loaded_paths[0])
         elif artifact_policy == "required":
             return "degraded", None, "Required notification artifact was unavailable."
         result: dict[str, Any] | None = None
@@ -705,7 +679,7 @@ class EventNotificationPublisher:
                     event_id,
                     datetime.fromtimestamp(float(occurred), timezone.utc),
                     data,
-                    media_ids,
+                    image_paths,
                 )
                 break
             except (CoconutShellError, OSError, OverflowError, ValueError):
@@ -743,7 +717,6 @@ class EventNotificationPublisher:
                 try:
                     for path in artifact_paths:
                         path.unlink(missing_ok=True)
-                    self._staged_media_path(event_id).unlink(missing_ok=True)
                 except OSError:
                     return (
                         "degraded",
@@ -806,101 +779,6 @@ class EventNotificationPublisher:
             artifact_dir / f"{artifact_id}.png",
             artifact_dir / f"{artifact_id}.json",
         )
-
-    def _staged_media_path(self, event_id: str) -> Path:
-        return self._notification_dir / "media" / f"{event_id}.json"
-
-    def _load_staged_media(self, event_id: str, artifact_id: str) -> str | None:
-        if re.fullmatch(r"^[0-9a-f]{32}$", artifact_id or "") is None:
-            raise CoconutShellError("notification media staging is invalid")
-        path = self._staged_media_path(event_id)
-        if not path.parent.exists():
-            return None
-        try:
-            directory = path.parent.lstat()
-            if (
-                not stat.S_ISDIR(directory.st_mode)
-                or stat.S_ISLNK(directory.st_mode)
-                or directory.st_mode & 0o077
-            ):
-                raise OSError
-            raw = _read_private_regular_file(path, MAX_MEDIA_STAGING_BYTES)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            raise CoconutShellError("notification media staging is unavailable") from None
-        try:
-            value = json.loads(raw.decode("utf-8"))
-            if not isinstance(value, dict) or set(value) != {
-                "event_id",
-                "artifact_id",
-                "media_id",
-                "created_at",
-            }:
-                raise ValueError
-            created_at = value["created_at"]
-            if (
-                value["event_id"] != event_id
-                or value["artifact_id"] != artifact_id
-                or not _valid_identifier(value["media_id"])
-                or not _valid_text(created_at, 40)
-            ):
-                raise ValueError
-            parsed_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
-                raise ValueError
-        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            raise CoconutShellError("notification media staging is invalid") from None
-        return value["media_id"]
-
-    def _write_staged_media(self, event_id: str, artifact_id: str, media_id: str) -> None:
-        if not _valid_identifier(media_id):
-            raise CoconutShellError("notification media identifier is invalid")
-        media_dir = self._notification_dir / "media"
-        try:
-            created = False
-            try:
-                media_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
-                created = True
-            except FileExistsError:
-                pass
-            directory = media_dir.lstat()
-            if (
-                not stat.S_ISDIR(directory.st_mode)
-                or stat.S_ISLNK(directory.st_mode)
-                or directory.st_mode & 0o077
-            ):
-                raise OSError
-            if created:
-                os.chmod(media_dir, 0o700)
-            path = self._staged_media_path(event_id)
-            temporary = media_dir / f".{event_id}.{os.getpid()}.tmp"
-            encoded = json.dumps(
-                {
-                    "event_id": event_id,
-                    "artifact_id": artifact_id,
-                    "media_id": media_id,
-                    "created_at": _rfc3339(self._clock()),
-                },
-                separators=(",", ":"),
-            ).encode("utf-8")
-            descriptor = os.open(
-                temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-            with os.fdopen(descriptor, "wb") as output:
-                output.write(encoded)
-                output.flush()
-                os.fsync(output.fileno())
-            temporary.replace(path)
-        except OSError:
-            raise CoconutShellError("notification media staging failed") from None
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except (OSError, UnboundLocalError):
-                pass
 
     def _write_ack(self, event_id: str, state: str, notification_id: str) -> None:
         ack_dir = self._notification_dir / "acks"
@@ -1004,10 +882,6 @@ def _valid_identifier(value: Any) -> bool:
     return _valid_text(value, 128) and not any(character.isspace() for character in value)
 
 
-def _valid_source_token(value: str) -> bool:
-    return SOURCE_TOKEN_PATTERN.fullmatch(value) is not None
-
-
 def _rfc3339(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -1035,24 +909,194 @@ def _read_regular_file(path: Path, limit: int) -> bytes:
         os.close(descriptor)
 
 
-def _read_private_regular_file(path: Path, limit: int) -> bytes:
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    if no_follow == 0:
-        raise OSError("no-follow file access is unavailable")
-    descriptor = os.open(path, os.O_RDONLY | no_follow)
+def _sign_request(key: bytes, method: str, path: str, timestamp: int, nonce: str, body: bytes) -> str:
+    digest = hashlib.sha256(body).hexdigest()
+    canonical = f"COCONUT-SHELL-HMAC-V1\n{method}\n{path}\n{timestamp}\n{nonce}\n{digest}\n".encode()
+    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+
+
+def _image_descriptor(path: Path) -> dict[str, str]:
+    if not path.is_absolute():
+        raise CoconutShellError("notification image path is invalid")
+    contents = _read_regular_file(path, MAX_MEDIA_BYTES)
+    return {"path": str(path), "sha256": hashlib.sha256(contents).hexdigest()}
+
+
+def _write_temporary_image(contents: bytes, content_type: str) -> Path:
+    if not contents or len(contents) > MAX_MEDIA_BYTES or content_type not in {"image/jpeg", "image/png"}:
+        raise CoconutShellError("notification snapshot is invalid")
+    suffix = ".jpg" if content_type == "image/jpeg" else ".png"
+    descriptor, raw_path = tempfile.mkstemp(prefix="streambot-coconut-shell-", suffix=suffix)
+    path = Path(raw_path)
     try:
-        metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_mode & 0o077
-            or metadata.st_size <= 0
-            or metadata.st_size > limit
-        ):
-            raise OSError("private file is unsafe")
-        with os.fdopen(descriptor, "rb", closefd=False) as source:
-            contents = source.read(limit + 1)
-        if not contents or len(contents) > limit:
-            raise OSError("private file exceeds its bound")
-        return contents
-    finally:
-        os.close(descriptor)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _unlink_optional(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _attach_images(message: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
+    card = dict(message["card"])
+    elements = list(card["elements"])
+    for name in names:
+        elements.append({
+            "tag": "img",
+            "img_key": f"coconut://image/{name}",
+            "alt": {"tag": "plain_text", "content": "Streambot evidence"},
+        })
+    card["elements"] = elements
+    return {"msg_type": "interactive", "card": card}
+
+
+def _message_for(type_key: str, data: dict[str, Any], has_image: bool) -> tuple[dict[str, Any], str, str]:
+    try:
+        if type_key == "streambot.hourly_status":
+            running = data["running_jobs"]
+            names = [job["display_name"] for job in running]
+            count = _integer(data["running_count"])
+            if count <= 0 or count != len(names):
+                raise ValueError
+            summary = f"{count} {'job is' if count == 1 else 'jobs are'} currently running under Streambot: {_summarize_names(names)}."
+            title = "Streambot hourly status"
+            return _standard_card(
+                title, "Platform job activity report", "blue", "Active",
+                [("Running", str(count)), ("Registered", str(data["registered_count"])),
+                 ("Collected", str(data["collected_at"])), ("Snapshot", "Attached" if has_image else "Not attached")],
+                summary, "Collected once by the Streambot control plane; Coconut Shell owns delivery.",
+            ), title, summary
+        if type_key == "streambot.poly_bridge.completed":
+            level = _required_text(data["level"], 64)
+            placed, planned, missing = _integer(data["placed_count"]), _integer(data["planned_count"]), _integer(data["missing_count"])
+            if not isinstance(data["complete"], bool):
+                raise ValueError
+            complete = data["complete"]
+            if planned <= 0 or placed < 0 or placed > planned or missing != planned - placed or (complete and missing):
+                raise ValueError
+            title = f"Poly Bridge {level}"
+            summary = f"Level {level} was saved with {placed} of {planned} planned members placed."
+            missing_text = _optional_text(data.get("missing_summary"), 160) or "None"
+            return _standard_card(
+                title, "Saved build result", "green" if complete else "orange", "Complete" if complete else "Partial",
+                [("Placed", f"{placed}/{planned}"), ("Missing", missing_text),
+                 ("Duration", _format_duration(_number(data["duration_seconds"]))), ("Snapshot", "Optional evidence")],
+                summary, "Collected by the Streambot Poly Bridge job; delivered by Coconut Shell.",
+            ), title, summary
+        if type_key == "streambot.poly_bridge.stalled":
+            idle, threshold = _integer(data["idle_seconds"]), _integer(data["threshold_seconds"])
+            if idle <= 0 or threshold <= 0 or idle < threshold:
+                raise ValueError
+            last_command = _optional_text(data.get("last_command"), 120) or "Unavailable"
+            title = "Poly Bridge stalled"
+            summary = "The job may still be alive, but no input has reached the game beyond the configured threshold."
+            return _standard_card(
+                title, "No game input reached the worker", "red", "Intervention required",
+                [("Idle", _format_duration(idle)), ("Threshold", _format_duration(threshold)),
+                 ("Last command", last_command), ("Profile", "Operations")],
+                summary, "Inspect the Streambot control plane before restarting or intervening.",
+            ), title, summary
+        if type_key == "streambot.pilot.assistance_required":
+            job = _required_text(data["job"], 64)
+            outcome = data["outcome"]
+            attempts = _integer(data["attempt_count"])
+            if outcome not in {"abstained", "gave-up", "timeout"} or not 0 <= attempts <= 20:
+                raise ValueError
+            page_key = _required_text(data["page_key"], 120)
+            title = "Pilot assistance required"
+            summary = "The automated resolver could not confirm progress and returned the page for operator review."
+            return _standard_card(
+                title, job, "orange", "Parked",
+                [("Outcome", outcome), ("Attempts", str(attempts)), ("Page key", page_key), ("Input", "Paused")],
+                summary, "Teach the resolution through the existing Pilot workflow; no restart is required.",
+            ), title, summary
+        if type_key == "streambot.marketplace_match":
+            item = _required_text(data["item"], 120)
+            observed, threshold = _integer(data["observed_price"]), _integer(data["threshold"])
+            operator = data["operator"]
+            if observed < 0 or threshold < 0 or operator not in {"<", "<=", ">", ">=", "=="} or not _condition(observed, operator, threshold):
+                raise ValueError
+            title = "Marketplace watch matched"
+            summary = f"{item} was observed at {observed} and matched the configured {operator} {threshold} condition."
+            return _standard_card(
+                title, item, "green", "Matched",
+                [("Item", item), ("Observed", str(observed)), ("Condition", f"{operator} {threshold}"), ("Action", "Review manually")],
+                summary, "Observation only; Streambot never purchases marketplace items.",
+            ), title, summary
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise CoconutShellError("notification event is invalid") from None
+    raise CoconutShellError("notification event type is unsupported")
+
+
+def _standard_card(
+    title: str, subtitle: str, template: str, status: str,
+    facts: list[tuple[str, str]], outcome: str, note: str,
+) -> dict[str, Any]:
+    fields = [{"is_short": True, "text": {"tag": "lark_md", "content": f"**{_escape_md(label)}**\n{_escape_md(value)}"}}
+              for label, value in [("Status", status), *facts]]
+    return {"msg_type": "interactive", "card": {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": template, "title": {"tag": "plain_text", "content": title}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "plain_text", "content": subtitle}},
+            {"tag": "div", "fields": fields},
+            {"tag": "div", "text": {"tag": "plain_text", "content": outcome}},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": note}]},
+        ],
+    }}
+
+
+def _required_text(value: Any, limit: int) -> str:
+    if not _valid_text(value, limit):
+        raise ValueError
+    return value
+
+
+def _escape_md(value: str) -> str:
+    value = value.replace("<", "＜").replace(">", "＞")
+    return re.sub(r"([\\*_\[\]()`])", r"\\\1", value)
+
+
+def _optional_text(value: Any, limit: int) -> str:
+    if value in {None, ""}:
+        return ""
+    return _required_text(value, limit)
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds <= 0 or seconds > 7 * 24 * 60 * 60:
+        return "Unavailable"
+    return f"{seconds:.0f} seconds" if seconds < 60 else f"{seconds / 60:.1f} minutes"
+
+
+def _integer(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError
+    return value
+
+
+def _number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError
+    return float(value)
+
+
+def _summarize_names(names: list[str]) -> str:
+    return ", ".join(names) if len(names) <= 5 else f"{', '.join(names[:5])}, and {len(names) - 5} more"
+
+
+def _condition(observed: int, operator: str, threshold: int) -> bool:
+    return {"<": observed < threshold, "<=": observed <= threshold, ">": observed > threshold,
+            ">=": observed >= threshold, "==": observed == threshold}[operator]

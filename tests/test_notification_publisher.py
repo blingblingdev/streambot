@@ -25,6 +25,7 @@ from streambot.notification_publisher import (  # noqa: E402
     PublisherConfigurationError,
     SnapshotError,
     StreambotNotificationSnapshot,
+    _message_for,
 )
 
 NOW = datetime(2026, 8, 19, 10, 23, 45, tzinfo=timezone.utc)
@@ -54,6 +55,22 @@ def snapshot(running: bool = True) -> StreambotNotificationSnapshot:
     )
 
 
+def completed_data() -> dict:
+    return {
+        "level": "1-1",
+        "complete": True,
+        "placed_count": 8,
+        "planned_count": 8,
+        "missing_count": 0,
+        "missing_summary": "",
+        "duration_seconds": 95.0,
+    }
+
+
+def assistance_data() -> dict:
+    return {"job": "pilot", "outcome": "abstained", "page_key": "map-1", "attempt_count": 2}
+
+
 class Response:
     def __init__(self, payload: dict, status: int = 200) -> None:
         self.status = status
@@ -74,13 +91,13 @@ class PublisherConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             config = PublisherConfig.from_environment()
         self.assertFalse(config.enabled)
-        self.assertEqual(config.source_token, "")
+        self.assertEqual(config.global_key, "")
 
-    def test_enabled_configuration_requires_https_and_a_bounded_token(self) -> None:
+    def test_enabled_configuration_requires_safe_transport_and_signing_key(self) -> None:
         values = {
             "STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED": "true",
             "COCONUT_SHELL_BASE_URL": "https://coconut.example.test",
-            "COCONUT_SHELL_STREAMBOT_SOURCE_TOKEN": "cshp_v1_" + "x" * 43,
+            "COCONUT_SHELL_GLOBAL_KEY": "x" * 32,
         }
         with mock.patch.dict(os.environ, values, clear=True):
             config = PublisherConfig.from_environment()
@@ -135,46 +152,34 @@ class CoconutShellClientTests(unittest.TestCase):
 
         def opener(request, timeout):
             self.requests.append((request, timeout))
-            if request.full_url.endswith("/api/v1/media"):
-                return Response({"id": "00000000-0000-4000-8000-000000000001"}, 201)
             if request.full_url.endswith("/api/v1/notifications"):
                 return Response({"id": "event-1", "state": "pending"}, 202)
-            if request.full_url.endswith("/api/v1/sources/heartbeat"):
-                return Response({"status": "accepted"})
             return Response({"id": "event-1", "state": "succeeded"})
 
         self.config = PublisherConfig(
             enabled=True,
             base_url="https://coconut.example.test",
-            source_token="cshp_v1_" + "x" * 43,
+            global_key="x" * 32,
         )
         self.client = CoconutShellClient(self.config, opener=opener)
 
-    def test_client_uploads_and_submits_the_exact_contract(self) -> None:
-        media_id = self.client.upload_media(b"\xff\xd8\xfffixture", "image/jpeg")
-        accepted = self.client.submit(snapshot(), "hour:2026-08-19T10", [media_id])
+    def test_client_signs_and_submits_the_exact_native_contract(self) -> None:
+        with TemporaryDirectory() as directory:
+            image = Path(directory) / "snapshot.jpg"
+            image.write_bytes(b"\xff\xd8\xfffixture")
+            accepted = self.client.submit(snapshot(), "hour:2026-08-19T10", [image])
         terminal = self.client.status(accepted["id"])
-        self.client.heartbeat(
-            {
-                "state": "succeeded",
-                "reason": "",
-                "last_bucket": "hour:2026-08-19T10",
-                "last_notification_id": "00000000-0000-4000-8000-000000000001",
-            }
-        )
         self.assertEqual(terminal["state"], "succeeded")
-        notification_request = self.requests[1][0]
+        notification_request = self.requests[0][0]
         payload = json.loads(notification_request.data)
+        self.assertEqual(payload["contract"], "native-feishu-v1")
+        self.assertEqual(payload["source"], "streambot")
         self.assertEqual(payload["type"], "streambot.hourly_status")
         self.assertEqual(payload["idempotency_key"], "hour:2026-08-19T10")
-        self.assertEqual(payload["media_ids"], [media_id])
-        self.assertEqual(
-            notification_request.get_header("Authorization"),
-            "Bearer cshp_v1_" + "x" * 43,
-        )
-        heartbeat_payload = json.loads(self.requests[3][0].data)
-        self.assertEqual(heartbeat_payload["state"], "healthy")
-        self.assertEqual(heartbeat_payload["last_outcome"], "succeeded")
+        self.assertEqual(payload["message"]["msg_type"], "interactive")
+        self.assertEqual(list(payload["images"]), ["image_1"])
+        self.assertEqual(notification_request.get_header("X-coconut-key-id"), "local-global")
+        self.assertRegex(notification_request.get_header("X-coconut-signature"), r"^[0-9a-f]{64}$")
 
     def test_client_errors_never_include_response_or_credentials(self) -> None:
         def failing(_request, timeout):
@@ -186,7 +191,22 @@ class CoconutShellClientTests(unittest.TestCase):
             client.submit(snapshot(), "hour:2026-08-19T10", [])
         message = str(raised.exception)
         self.assertNotIn("private", message)
-        self.assertNotIn(self.config.source_token, message)
+        self.assertNotIn(self.config.global_key, message)
+
+    def test_every_streambot_type_builds_its_native_card(self) -> None:
+        fixtures = {
+            "streambot.hourly_status": snapshot().payload(),
+            "streambot.poly_bridge.completed": completed_data(),
+            "streambot.poly_bridge.stalled": {"idle_seconds": 90, "threshold_seconds": 60, "last_command": "click"},
+            "streambot.pilot.assistance_required": assistance_data(),
+            "streambot.marketplace_match": {"item": "Rare material", "observed_price": 90, "operator": "<=", "threshold": 100},
+        }
+        for type_key, data in fixtures.items():
+            with self.subTest(type_key=type_key):
+                message, title, summary = _message_for(type_key, data, False)
+                self.assertEqual(message["msg_type"], "interactive")
+                self.assertEqual(message["card"]["header"]["title"]["content"], title)
+                self.assertTrue(summary)
 
 
 class FakeClient:
@@ -197,18 +217,14 @@ class FakeClient:
         self.heartbeats = []
         self.fail_first_submit = fail_first_submit
 
-    def upload_media(self, contents, content_type):
-        self.uploads += 1
-        return "media-1"
-
-    def submit(self, value, key, media_ids):
-        self.submissions.append((value, key, list(media_ids)))
+    def submit(self, value, key, image_paths):
+        self.submissions.append((value, key, list(image_paths)))
         if self.fail_first_submit and len(self.submissions) == 1:
             raise CoconutShellError("safe failure")
         return {"id": "event-1", "state": "pending"}
 
-    def submit_event(self, type_key, key, occurred_at, data, media_ids):
-        self.submissions.append((type_key, key, occurred_at, data, list(media_ids)))
+    def submit_event(self, type_key, key, occurred_at, data, image_paths):
+        self.submissions.append((type_key, key, occurred_at, data, list(image_paths)))
         if self.fail_first_submit and len(self.submissions) == 1:
             raise CoconutShellError("safe failure")
         return {"id": "event-1", "state": "pending"}
@@ -227,7 +243,7 @@ class HourlyPublisherTests(unittest.TestCase):
         return PublisherConfig(
             enabled=True,
             base_url="https://coconut.example.test",
-            source_token="cshp_v1_" + "x" * 43,
+            global_key="x" * 32,
             poll_interval=0.001,
             terminal_timeout=1,
             submit_attempts=2,
@@ -254,7 +270,7 @@ class HourlyPublisherTests(unittest.TestCase):
         publisher._stop.wait = mock.Mock(return_value=False)
         result = publisher.run_once(NOW)
         self.assertEqual(result["state"], "succeeded")
-        self.assertEqual(client.uploads, 1)
+        self.assertEqual(len(client.submissions[0][2]), 1)
         self.assertEqual(client.status_calls, 1)
         self.assertEqual(
             [submission[1] for submission in client.submissions],
@@ -312,7 +328,7 @@ class EventPublisherTests(unittest.TestCase):
         return PublisherConfig(
             enabled=True,
             base_url="https://coconut.example.test",
-            source_token="cshp_v1_" + "x" * 43,
+            global_key="x" * 32,
             poll_interval=0.001,
             terminal_timeout=1,
             submit_attempts=1,
@@ -344,7 +360,7 @@ class EventPublisherTests(unittest.TestCase):
             "event": "notification",
             "notification_kind": "completed",
             "event_id": event_id,
-            "data": {"placed_count": 8},
+            "data": completed_data(),
             "t": int(NOW.timestamp()),
         }
         client = FakeClient()
@@ -388,7 +404,7 @@ class EventPublisherTests(unittest.TestCase):
             "notification_kind": "completed",
             "event_id": event_id,
             "artifact_id": event_id,
-            "data": {"placed_count": 8},
+            "data": completed_data(),
             "t": int(NOW.timestamp()),
         }
         client = FakeClient()
@@ -432,8 +448,7 @@ class EventPublisherTests(unittest.TestCase):
             self.assertFalse(metadata_path.exists())
         self.assertEqual(result["state"], "succeeded")
         self.assertEqual(cursor["value"], 1)
-        self.assertEqual(client.uploads, 1)
-        self.assertEqual(client.submissions[0][-1], ["media-1"])
+        self.assertEqual(len(client.submissions[0][-1]), 1)
 
     def test_uploaded_artifact_is_reused_after_acceptance_failure_and_restart(self) -> None:
         cursor = {"value": 0}
@@ -445,7 +460,7 @@ class EventPublisherTests(unittest.TestCase):
             "notification_kind": "assistance_required",
             "event_id": event_id,
             "artifact_id": event_id,
-            "data": {"reason": "Operator input is required."},
+            "data": assistance_data(),
             "t": int(NOW.timestamp()),
         }
         routes = lambda: {
@@ -468,43 +483,13 @@ class EventPublisherTests(unittest.TestCase):
 
             first = EventNotificationPublisher(self.config(), lambda _after, _limit: [event], lambda: 1, lambda: cursor["value"], lambda value: cursor.update(value=value), routes, notification_dir, client=client, clock=lambda: NOW)
             self.assertEqual(first.run_once()["state"], "degraded")
-            staging_path = notification_dir / "media" / f"{event_id}.json"
-            self.assertTrue(staging_path.exists())
-            self.assertEqual(staging_path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(client.uploads, 1)
+            self.assertTrue(data_path.exists())
 
             client.fail_first_submit = False
             restarted = EventNotificationPublisher(self.config(), lambda _after, _limit: [event], lambda: 1, lambda: cursor["value"], lambda value: cursor.update(value=value), routes, notification_dir, client=client, clock=lambda: NOW)
             self.assertEqual(restarted.run_once()["state"], "succeeded")
-            self.assertEqual(client.uploads, 1)
-            self.assertEqual(client.submissions[-1][-1], ["media-1"])
-            self.assertFalse(staging_path.exists())
+            self.assertEqual(len(client.submissions[-1][-1]), 1)
             self.assertFalse(data_path.exists())
-
-    def test_staged_media_mismatch_and_symlink_fail_closed(self) -> None:
-        cursor = {"value": 0}
-        event_id = "f" * 32
-        event = {"rowid": 1, "job": "pilot", "event": "notification", "notification_kind": "assistance_required", "event_id": event_id, "artifact_id": event_id, "data": {"reason": "Help."}, "t": int(NOW.timestamp())}
-        routes = lambda: {"pilot": {"assistance_required": {"type": "streambot.pilot.assistance_required", "artifact": "required"}}}
-        for unsafe in ("mismatch", "symlink"):
-            with self.subTest(unsafe=unsafe), TemporaryDirectory() as directory:
-                notification_dir = Path(directory)
-                media_dir = notification_dir / "media"
-                media_dir.mkdir(mode=0o700)
-                path = media_dir / f"{event_id}.json"
-                value = {"event_id": event_id, "artifact_id": "0" * 32, "media_id": "media-1", "created_at": "2026-08-19T10:00:00Z"}
-                if unsafe == "mismatch":
-                    path.write_text(json.dumps(value), encoding="utf-8")
-                    path.chmod(0o600)
-                else:
-                    target = notification_dir / "outside.json"
-                    target.write_text(json.dumps(value), encoding="utf-8")
-                    path.symlink_to(target)
-                client = FakeClient()
-                publisher = EventNotificationPublisher(self.config(), lambda _after, _limit: [event], lambda: 1, lambda: cursor["value"], lambda value: cursor.update(value=value), routes, notification_dir, client=client)
-                self.assertEqual(publisher.run_once()["state"], "degraded")
-                self.assertEqual(client.uploads, 0)
-                self.assertEqual(client.submissions, [])
 
     def test_unsafe_optional_artifact_degrades_to_text_without_following_symlink(self) -> None:
         cursor = {"value": 0}
@@ -516,7 +501,7 @@ class EventPublisherTests(unittest.TestCase):
             "notification_kind": "completed",
             "event_id": event_id,
             "artifact_id": event_id,
-            "data": {"placed_count": 8},
+            "data": completed_data(),
             "t": int(NOW.timestamp()),
         }
         client = FakeClient()
@@ -548,7 +533,6 @@ class EventPublisherTests(unittest.TestCase):
         self.assertEqual(result["state"], "succeeded")
         self.assertIn("Optional", result["reason"])
         self.assertEqual(cursor["value"], 1)
-        self.assertEqual(client.uploads, 0)
         self.assertEqual(client.submissions[0][-1], [])
 
     def test_missing_required_artifact_blocks_delivery_and_cursor(self) -> None:
@@ -561,7 +545,7 @@ class EventPublisherTests(unittest.TestCase):
             "notification_kind": "assistance_required",
             "event_id": event_id,
             "artifact_id": event_id,
-            "data": {"reason": "Operator input is required."},
+            "data": assistance_data(),
             "t": int(NOW.timestamp()),
         }
         client = FakeClient()
