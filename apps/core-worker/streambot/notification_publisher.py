@@ -27,6 +27,7 @@ TYPE_KEY = "streambot.hourly_status"
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
 MAX_ARTIFACT_METADATA_BYTES = 16 * 1024
+MAX_MEDIA_STAGING_BYTES = 4 * 1024
 TERMINAL_STATES = {"succeeded", "suppressed", "failed", "ambiguous"}
 SOURCE_TOKEN_PATTERN = re.compile(r"^cshp_v1_[A-Za-z0-9_-]{43}$")
 
@@ -662,18 +663,38 @@ class EventNotificationPublisher:
         media_ids: list[str] = []
         artifact_id = event.get("artifact_id")
         artifact_policy = route["artifact"]
-        artifact_paths: tuple[Path, Path] | None = None
+        artifact_paths: tuple[Path, ...] | None = None
         artifact_reason = ""
         if artifact_id is not None:
             if artifact_policy == "none":
                 return "ignored", None, "Unexpected notification artifact was skipped."
             try:
-                contents, content_type, artifact_paths = self._load_artifact(artifact_id)
-                media_ids.append(self._client.upload_media(contents, content_type))
+                staged_media_id = self._load_staged_media(event_id, artifact_id)
             except CoconutShellError:
-                if artifact_policy == "required":
-                    return "degraded", None, "Required notification artifact was unavailable."
-                artifact_reason = "Optional notification artifact was unavailable."
+                return "degraded", None, "Notification media staging is invalid."
+            if staged_media_id is not None:
+                media_ids.append(staged_media_id)
+                artifact_paths = self._artifact_paths(artifact_id)
+            else:
+                try:
+                    contents, content_type, artifact_paths = self._load_artifact(artifact_id)
+                except CoconutShellError:
+                    if artifact_policy == "required":
+                        return "degraded", None, "Required notification artifact was unavailable."
+                    artifact_reason = "Optional notification artifact was unavailable."
+                else:
+                    try:
+                        media_id = self._client.upload_media(contents, content_type)
+                    except CoconutShellError:
+                        if artifact_policy == "required":
+                            return "degraded", None, "Required notification artifact was unavailable."
+                        artifact_reason = "Optional notification artifact was unavailable."
+                    else:
+                        try:
+                            self._write_staged_media(event_id, artifact_id, media_id)
+                        except CoconutShellError:
+                            return "degraded", None, "Notification media staging failed."
+                        media_ids.append(media_id)
         elif artifact_policy == "required":
             return "degraded", None, "Required notification artifact was unavailable."
         result: dict[str, Any] | None = None
@@ -719,8 +740,16 @@ class EventNotificationPublisher:
         if state in {"succeeded", "suppressed"}:
             self._write_ack(event_id, state, notification_id)
             if artifact_paths is not None:
-                for path in artifact_paths:
-                    path.unlink(missing_ok=True)
+                try:
+                    for path in artifact_paths:
+                        path.unlink(missing_ok=True)
+                    self._staged_media_path(event_id).unlink(missing_ok=True)
+                except OSError:
+                    return (
+                        "degraded",
+                        notification_id,
+                        "Confirmed notification media cleanup is incomplete.",
+                    )
             return state, notification_id, artifact_reason
         if state in {"failed", "ambiguous"}:
             return (
@@ -769,6 +798,109 @@ class EventNotificationPublisher:
         if not contents:
             raise CoconutShellError("notification artifact is invalid")
         return contents, content_type, (data_path, metadata_path)
+
+    def _artifact_paths(self, artifact_id: str) -> tuple[Path, ...]:
+        artifact_dir = self._notification_dir / "artifacts"
+        return (
+            artifact_dir / f"{artifact_id}.jpg",
+            artifact_dir / f"{artifact_id}.png",
+            artifact_dir / f"{artifact_id}.json",
+        )
+
+    def _staged_media_path(self, event_id: str) -> Path:
+        return self._notification_dir / "media" / f"{event_id}.json"
+
+    def _load_staged_media(self, event_id: str, artifact_id: str) -> str | None:
+        if re.fullmatch(r"^[0-9a-f]{32}$", artifact_id or "") is None:
+            raise CoconutShellError("notification media staging is invalid")
+        path = self._staged_media_path(event_id)
+        if not path.parent.exists():
+            return None
+        try:
+            directory = path.parent.lstat()
+            if (
+                not stat.S_ISDIR(directory.st_mode)
+                or stat.S_ISLNK(directory.st_mode)
+                or directory.st_mode & 0o077
+            ):
+                raise OSError
+            raw = _read_private_regular_file(path, MAX_MEDIA_STAGING_BYTES)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise CoconutShellError("notification media staging is unavailable") from None
+        try:
+            value = json.loads(raw.decode("utf-8"))
+            if not isinstance(value, dict) or set(value) != {
+                "event_id",
+                "artifact_id",
+                "media_id",
+                "created_at",
+            }:
+                raise ValueError
+            created_at = value["created_at"]
+            if (
+                value["event_id"] != event_id
+                or value["artifact_id"] != artifact_id
+                or not _valid_identifier(value["media_id"])
+                or not _valid_text(created_at, 40)
+            ):
+                raise ValueError
+            parsed_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if parsed_at.tzinfo is None or parsed_at.utcoffset() is None:
+                raise ValueError
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            raise CoconutShellError("notification media staging is invalid") from None
+        return value["media_id"]
+
+    def _write_staged_media(self, event_id: str, artifact_id: str, media_id: str) -> None:
+        if not _valid_identifier(media_id):
+            raise CoconutShellError("notification media identifier is invalid")
+        media_dir = self._notification_dir / "media"
+        try:
+            created = False
+            try:
+                media_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+                created = True
+            except FileExistsError:
+                pass
+            directory = media_dir.lstat()
+            if (
+                not stat.S_ISDIR(directory.st_mode)
+                or stat.S_ISLNK(directory.st_mode)
+                or directory.st_mode & 0o077
+            ):
+                raise OSError
+            if created:
+                os.chmod(media_dir, 0o700)
+            path = self._staged_media_path(event_id)
+            temporary = media_dir / f".{event_id}.{os.getpid()}.tmp"
+            encoded = json.dumps(
+                {
+                    "event_id": event_id,
+                    "artifact_id": artifact_id,
+                    "media_id": media_id,
+                    "created_at": _rfc3339(self._clock()),
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary.replace(path)
+        except OSError:
+            raise CoconutShellError("notification media staging failed") from None
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except (OSError, UnboundLocalError):
+                pass
 
     def _write_ack(self, event_id: str, state: str, notification_id: str) -> None:
         ack_dir = self._notification_dir / "acks"
@@ -898,6 +1030,29 @@ def _read_regular_file(path: Path, limit: int) -> bytes:
             contents = source.read(limit + 1)
         if not contents or len(contents) > limit:
             raise OSError("notification artifact exceeds its bound")
+        return contents
+    finally:
+        os.close(descriptor)
+
+
+def _read_private_regular_file(path: Path, limit: int) -> bytes:
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if no_follow == 0:
+        raise OSError("no-follow file access is unavailable")
+    descriptor = os.open(path, os.O_RDONLY | no_follow)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_mode & 0o077
+            or metadata.st_size <= 0
+            or metadata.st_size > limit
+        ):
+            raise OSError("private file is unsafe")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            contents = source.read(limit + 1)
+        if not contents or len(contents) > limit:
+            raise OSError("private file exceeds its bound")
         return contents
     finally:
         os.close(descriptor)

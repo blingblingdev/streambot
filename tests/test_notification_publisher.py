@@ -209,6 +209,8 @@ class FakeClient:
 
     def submit_event(self, type_key, key, occurred_at, data, media_ids):
         self.submissions.append((type_key, key, occurred_at, data, list(media_ids)))
+        if self.fail_first_submit and len(self.submissions) == 1:
+            raise CoconutShellError("safe failure")
         return {"id": "event-1", "state": "pending"}
 
     def status(self, notification_id):
@@ -432,6 +434,77 @@ class EventPublisherTests(unittest.TestCase):
         self.assertEqual(cursor["value"], 1)
         self.assertEqual(client.uploads, 1)
         self.assertEqual(client.submissions[0][-1], ["media-1"])
+
+    def test_uploaded_artifact_is_reused_after_acceptance_failure_and_restart(self) -> None:
+        cursor = {"value": 0}
+        event_id = "e" * 32
+        event = {
+            "rowid": 1,
+            "job": "pilot",
+            "event": "notification",
+            "notification_kind": "assistance_required",
+            "event_id": event_id,
+            "artifact_id": event_id,
+            "data": {"reason": "Operator input is required."},
+            "t": int(NOW.timestamp()),
+        }
+        routes = lambda: {
+            "pilot": {
+                "assistance_required": {
+                    "type": "streambot.pilot.assistance_required",
+                    "artifact": "required",
+                }
+            }
+        }
+        client = FakeClient(fail_first_submit=True)
+        with TemporaryDirectory() as directory:
+            notification_dir = Path(directory)
+            artifact_dir = notification_dir / "artifacts"
+            artifact_dir.mkdir()
+            data_path = artifact_dir / f"{event_id}.png"
+            metadata_path = artifact_dir / f"{event_id}.json"
+            data_path.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
+            metadata_path.write_text(json.dumps({"id": event_id, "filename": data_path.name, "content_type": "image/png"}), encoding="utf-8")
+
+            first = EventNotificationPublisher(self.config(), lambda _after, _limit: [event], lambda: 1, lambda: cursor["value"], lambda value: cursor.update(value=value), routes, notification_dir, client=client, clock=lambda: NOW)
+            self.assertEqual(first.run_once()["state"], "degraded")
+            staging_path = notification_dir / "media" / f"{event_id}.json"
+            self.assertTrue(staging_path.exists())
+            self.assertEqual(staging_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(client.uploads, 1)
+
+            client.fail_first_submit = False
+            restarted = EventNotificationPublisher(self.config(), lambda _after, _limit: [event], lambda: 1, lambda: cursor["value"], lambda value: cursor.update(value=value), routes, notification_dir, client=client, clock=lambda: NOW)
+            self.assertEqual(restarted.run_once()["state"], "succeeded")
+            self.assertEqual(client.uploads, 1)
+            self.assertEqual(client.submissions[-1][-1], ["media-1"])
+            self.assertFalse(staging_path.exists())
+            self.assertFalse(data_path.exists())
+
+    def test_staged_media_mismatch_and_symlink_fail_closed(self) -> None:
+        cursor = {"value": 0}
+        event_id = "f" * 32
+        event = {"rowid": 1, "job": "pilot", "event": "notification", "notification_kind": "assistance_required", "event_id": event_id, "artifact_id": event_id, "data": {"reason": "Help."}, "t": int(NOW.timestamp())}
+        routes = lambda: {"pilot": {"assistance_required": {"type": "streambot.pilot.assistance_required", "artifact": "required"}}}
+        for unsafe in ("mismatch", "symlink"):
+            with self.subTest(unsafe=unsafe), TemporaryDirectory() as directory:
+                notification_dir = Path(directory)
+                media_dir = notification_dir / "media"
+                media_dir.mkdir(mode=0o700)
+                path = media_dir / f"{event_id}.json"
+                value = {"event_id": event_id, "artifact_id": "0" * 32, "media_id": "media-1", "created_at": "2026-08-19T10:00:00Z"}
+                if unsafe == "mismatch":
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                    path.chmod(0o600)
+                else:
+                    target = notification_dir / "outside.json"
+                    target.write_text(json.dumps(value), encoding="utf-8")
+                    path.symlink_to(target)
+                client = FakeClient()
+                publisher = EventNotificationPublisher(self.config(), lambda _after, _limit: [event], lambda: 1, lambda: cursor["value"], lambda value: cursor.update(value=value), routes, notification_dir, client=client)
+                self.assertEqual(publisher.run_once()["state"], "degraded")
+                self.assertEqual(client.uploads, 0)
+                self.assertEqual(client.submissions, [])
 
     def test_unsafe_optional_artifact_degrades_to_text_without_following_symlink(self) -> None:
         cursor = {"value": 0}
