@@ -7,6 +7,7 @@ processes, logs, manifests, or control sockets on its own.
 
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import hmac
@@ -966,7 +967,10 @@ def _read_regular_file(path: Path, limit: int) -> bytes:
 def _sign_request(key: bytes, method: str, path: str, timestamp: int, nonce: str, body: bytes) -> str:
     digest = hashlib.sha256(body).hexdigest()
     canonical = f"COCONUT-SHELL-HMAC-V1\n{method}\n{path}\n{timestamp}\n{nonce}\n{digest}\n".encode()
-    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+    signature = base64.urlsafe_b64encode(
+        hmac.new(key, canonical, hashlib.sha256).digest()
+    ).rstrip(b"=")
+    return "v1=" + signature.decode("ascii")
 
 
 def _image_descriptor(path: Path) -> dict[str, str]:

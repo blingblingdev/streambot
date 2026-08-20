@@ -26,6 +26,7 @@ from streambot.notification_publisher import (  # noqa: E402
     SnapshotError,
     StreambotNotificationSnapshot,
     _message_for,
+    _sign_request,
 )
 
 NOW = datetime(2026, 8, 19, 10, 23, 45, tzinfo=timezone.utc)
@@ -146,6 +147,22 @@ class PublisherConfigTests(unittest.TestCase):
                     PublisherConfig.from_environment(config_path)
 
 
+class SigningTests(unittest.TestCase):
+    def test_signing_matches_the_native_contract_vector(self) -> None:
+        signature = _sign_request(
+            b"0123456789abcdef0123456789abcdef",
+            "POST",
+            "/api/v1/notifications",
+            1_787_205_600,
+            "550e8400-e29b-41d4-a716-446655440000",
+            b'{"contract":"native-feishu-v1"}',
+        )
+        self.assertEqual(
+            signature,
+            "v1=YypB6wtcGh36rFsGTXnDvDU266K83NR86aohJl0z5vk",
+        )
+
+
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_uses_only_normalized_platform_status(self) -> None:
         value = snapshot()
@@ -215,7 +232,10 @@ class CoconutShellClientTests(unittest.TestCase):
         self.assertEqual(payload["message"]["msg_type"], "interactive")
         self.assertEqual(list(payload["images"]), ["image_1"])
         self.assertEqual(notification_request.get_header("X-coconut-key-id"), "local-global")
-        self.assertRegex(notification_request.get_header("X-coconut-signature"), r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            notification_request.get_header("X-coconut-signature"),
+            r"^v1=[A-Za-z0-9_-]{43}$",
+        )
 
     def test_client_errors_never_include_response_or_credentials(self) -> None:
         def failing(_request, timeout):
