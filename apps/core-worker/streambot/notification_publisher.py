@@ -33,6 +33,12 @@ MAX_ARTIFACT_METADATA_BYTES = 16 * 1024
 TERMINAL_STATES = {"succeeded", "suppressed", "failed", "ambiguous"}
 KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SOURCE_KEY = "streambot"
+DEFAULT_INSTALLATION_CONFIG = Path.home() / ".amanda" / ".env"
+INSTALLATION_KEYS = {
+    "COCONUT_SHELL_BASE_URL",
+    "COCONUT_SHELL_GLOBAL_KEY",
+    "COCONUT_SHELL_KEY_ID",
+}
 
 
 class PublisherConfigurationError(ValueError):
@@ -61,18 +67,32 @@ class PublisherConfig:
     heartbeat_interval: float = 30.0
 
     @classmethod
-    def from_environment(cls) -> "PublisherConfig":
+    def from_environment(
+        cls, installation_config: Path | None = None
+    ) -> "PublisherConfig":
         enabled = _environment_flag(
             "STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED", False
         )
         include_snapshot = _environment_flag(
             "STREAMBOT_HOURLY_PUBLISHER_INCLUDE_SNAPSHOT", True
         )
-        base_url = os.environ.get("COCONUT_SHELL_BASE_URL", "http://127.0.0.1:18081").strip()
-        global_key = os.environ.get("COCONUT_SHELL_GLOBAL_KEY", "").strip()
-        key_id = os.environ.get("COCONUT_SHELL_KEY_ID", "local-global").strip()
         if not enabled:
             return cls(enabled=False, include_snapshot=include_snapshot)
+        installation = _read_installation_config(
+            installation_config or DEFAULT_INSTALLATION_CONFIG
+        )
+        base_url = os.environ.get(
+            "COCONUT_SHELL_BASE_URL",
+            installation.get("COCONUT_SHELL_BASE_URL", "http://127.0.0.1:18081"),
+        ).strip()
+        global_key = os.environ.get(
+            "COCONUT_SHELL_GLOBAL_KEY",
+            installation.get("COCONUT_SHELL_GLOBAL_KEY", ""),
+        ).strip()
+        key_id = os.environ.get(
+            "COCONUT_SHELL_KEY_ID",
+            installation.get("COCONUT_SHELL_KEY_ID", "local-global"),
+        ).strip()
         _validate_base_url(base_url)
         if len(global_key.encode("utf-8")) < 32 or not KEY_ID_PATTERN.fullmatch(key_id):
             raise PublisherConfigurationError(
@@ -85,6 +105,40 @@ class PublisherConfig:
             key_id=key_id,
             include_snapshot=include_snapshot,
         )
+
+
+def _read_installation_config(path: Path) -> dict[str, str]:
+    try:
+        file_stat = path.stat()
+    except FileNotFoundError:
+        return {}
+    except OSError as error:
+        raise PublisherConfigurationError(
+            "Coconut Shell installation configuration cannot be inspected"
+        ) from error
+    if not stat.S_ISREG(file_stat.st_mode) or stat.S_IMODE(file_stat.st_mode) & 0o077:
+        raise PublisherConfigurationError(
+            "Coconut Shell installation configuration must be a private regular file"
+        )
+    values: dict[str, str] = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            name = name.strip()
+            if name not in INSTALLATION_KEYS:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            values[name] = value
+    except (OSError, UnicodeError) as error:
+        raise PublisherConfigurationError(
+            "Coconut Shell installation configuration cannot be read"
+        ) from error
+    return values
 
 
 @dataclass(frozen=True)

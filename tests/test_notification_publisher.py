@@ -109,6 +109,42 @@ class PublisherConfigTests(unittest.TestCase):
             with self.assertRaises(PublisherConfigurationError):
                 PublisherConfig.from_environment()
 
+    def test_enabled_configuration_reads_only_private_installation_values(self) -> None:
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / ".env"
+            config_path.write_text(
+                "COCONUT_SHELL_BASE_URL=http://127.0.0.1:18081\n"
+                f"COCONUT_SHELL_GLOBAL_KEY={'z' * 32}\n"
+                "COCONUT_SHELL_KEY_ID=local-global\n"
+                "FEISHU_APP_SECRET=must-not-be-loaded\n",
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            with mock.patch.dict(
+                os.environ,
+                {"STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED": "true"},
+                clear=True,
+            ):
+                config = PublisherConfig.from_environment(config_path)
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.base_url, "http://127.0.0.1:18081")
+        self.assertEqual(config.key_id, "local-global")
+
+    def test_enabled_configuration_rejects_public_installation_file(self) -> None:
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / ".env"
+            config_path.write_text(
+                f"COCONUT_SHELL_GLOBAL_KEY={'z' * 32}\n", encoding="utf-8"
+            )
+            config_path.chmod(0o644)
+            with mock.patch.dict(
+                os.environ,
+                {"STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED": "true"},
+                clear=True,
+            ):
+                with self.assertRaises(PublisherConfigurationError):
+                    PublisherConfig.from_environment(config_path)
+
 
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_uses_only_normalized_platform_status(self) -> None:
