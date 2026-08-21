@@ -90,6 +90,11 @@ Then open `http://127.0.0.1:8787/`. Options: `--port`, `--state-dir`
   job: a restarted console re-adopts the worker through its IPC socket and
   jobs through a process scan that verifies the full command line before it
   will ever signal a pid. Stopping anything is always an explicit action.
+  For a launchd-submitted console, send `SIGTERM` to the console PID and let
+  the keepalive job restart it. Do not use `launchctl kickstart -k`: launchd
+  can terminate the submitted job's entire process coalition, including
+  runners that the console itself deliberately leaves alive during graceful
+  shutdown.
 - **Platform-owned hourly notification** — the long-running console can build
   one normalized snapshot from its existing worker and `JobSupervisor.status()`
   surfaces and publish it through Coconut Shell. It stays silent when every
