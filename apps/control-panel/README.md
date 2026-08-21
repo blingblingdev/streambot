@@ -131,6 +131,12 @@ missed hours. A restart within the same UTC hour reuses the same idempotency
 key, so Coconut Shell returns the existing event rather than sending a
 duplicate.
 
+Every hourly boundary also submits a signed producer-cycle record. An idle hour
+reports `silent` without creating a Feishu message; a running hour reports the
+stable notification idempotency key; and a snapshot or admission failure reports
+a sanitized operational outcome. Coconut Shell can therefore distinguish a
+healthy idle hour from a missed Streambot cycle without adding another collector.
+
 Jobs request typed notifications through `JobEvents.notification`; they never
 load Coconut Shell or Feishu credentials. Each `job.json` maps its bounded
 logical event names to allowlisted `streambot.*` types and declares whether an

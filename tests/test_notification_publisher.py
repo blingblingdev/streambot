@@ -237,6 +237,26 @@ class CoconutShellClientTests(unittest.TestCase):
             r"^v1=[A-Za-z0-9_-]{43}$",
         )
 
+    def test_client_reports_a_signed_hourly_cycle(self) -> None:
+        self.client.report_cycle(
+            bucket="hour:2026-08-19T10",
+            observed_at=NOW,
+            outcome="silent",
+        )
+
+        request = self.requests[0][0]
+        self.assertTrue(request.full_url.endswith("/api/v1/producer-cycles"))
+        payload = json.loads(request.data)
+        self.assertEqual(payload["source"], "streambot")
+        self.assertEqual(payload["type"], "streambot.hourly_status")
+        self.assertEqual(payload["cycle_key"], "hour:2026-08-19T10")
+        self.assertEqual(payload["outcome"], "silent")
+        self.assertEqual(payload["expected_next_at"], "2026-08-19T11:00:00Z")
+        self.assertRegex(
+            request.get_header("X-coconut-signature"),
+            r"^v1=[A-Za-z0-9_-]{43}$",
+        )
+
     def test_client_errors_never_include_response_or_credentials(self) -> None:
         def failing(_request, timeout):
             self.assertEqual(timeout, self.config.request_timeout)
@@ -271,6 +291,7 @@ class FakeClient:
         self.submissions = []
         self.status_calls = 0
         self.heartbeats = []
+        self.cycles = []
         self.fail_first_submit = fail_first_submit
 
     def submit(self, value, key, image_paths):
@@ -293,6 +314,10 @@ class FakeClient:
         self.heartbeats.append(dict(publisher_status))
         return {"status": "accepted"}
 
+    def report_cycle(self, **cycle):
+        self.cycles.append(cycle)
+        return {"id": "4" * 32, "replayed": False}
+
 
 class HourlyPublisherTests(unittest.TestCase):
     def config(self) -> PublisherConfig:
@@ -314,6 +339,7 @@ class HourlyPublisherTests(unittest.TestCase):
         self.assertEqual(result["state"], "idle_skip")
         self.assertEqual(result["last_bucket"], "hour:2026-08-19T10")
         self.assertEqual(client.submissions, [])
+        self.assertEqual(client.cycles[0]["outcome"], "silent")
 
     def test_running_tick_retries_with_one_stable_key_and_polls_terminal_status(self) -> None:
         client = FakeClient(fail_first_submit=True)
@@ -332,6 +358,7 @@ class HourlyPublisherTests(unittest.TestCase):
             [submission[1] for submission in client.submissions],
             ["hour:2026-08-19T10", "hour:2026-08-19T10"],
         )
+        self.assertEqual(client.cycles[0]["outcome"], "notification_accepted")
 
     def test_optional_snapshot_failure_does_not_block_text_delivery(self) -> None:
         client = FakeClient()

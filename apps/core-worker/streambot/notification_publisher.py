@@ -303,6 +303,41 @@ class CoconutShellClient:
     def heartbeat(self, _publisher_status: dict[str, Any]) -> dict[str, Any]:
         return self._request("GET", "/api/v1/healthz", None, None)
 
+    def report_cycle(
+        self,
+        *,
+        bucket: str,
+        observed_at: datetime,
+        outcome: str,
+        notification_expected: bool = False,
+        failure_code: str = "",
+    ) -> dict[str, Any]:
+        if outcome not in {"silent", "notification_expected", "notification_accepted", "failed"}:
+            raise CoconutShellError("producer cycle outcome is invalid")
+        observed_at = observed_at.astimezone(timezone.utc)
+        next_hour = observed_at.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        body = json.dumps(
+            {
+                "source": SOURCE_KEY,
+                "type": TYPE_KEY,
+                "cycle_key": bucket,
+                "started_at": _rfc3339(observed_at),
+                "completed_at": _rfc3339(observed_at),
+                "outcome": outcome,
+                "expected_next_at": _rfc3339(next_hour),
+                "grace_seconds": 5 * 60,
+                "notification_idempotency_key": bucket if notification_expected else "",
+                "failure_code": failure_code,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return self._request(
+            "POST",
+            "/api/v1/producer-cycles",
+            body,
+            "application/json; charset=utf-8",
+        )
+
     def _request(
         self,
         method: str,
@@ -434,10 +469,32 @@ class HourlyNotificationPublisher:
         try:
             snapshot = self._snapshot_provider(now)
         except Exception:
+            try:
+                self._client.report_cycle(
+                    bucket=bucket,
+                    observed_at=now,
+                    outcome="failed",
+                    failure_code="snapshot_invalid",
+                )
+            except CoconutShellError:
+                pass
             return self._record(
                 "degraded", bucket, now, reason="Control-plane snapshot validation failed."
             )
         if not snapshot.running_jobs:
+            try:
+                self._client.report_cycle(
+                    bucket=bucket,
+                    observed_at=now,
+                    outcome="silent",
+                )
+            except CoconutShellError:
+                return self._record(
+                    "degraded",
+                    bucket,
+                    now,
+                    reason="Coconut Shell did not confirm the silent producer cycle.",
+                )
             return self._record(
                 "idle_skip", bucket, now, reason="No registered job is running."
             )
@@ -462,6 +519,15 @@ class HourlyNotificationPublisher:
                 break
             except CoconutShellError:
                 if attempt + 1 == self.config.submit_attempts:
+                    try:
+                        self._client.report_cycle(
+                            bucket=bucket,
+                            observed_at=now,
+                            outcome="notification_expected",
+                            notification_expected=True,
+                        )
+                    except CoconutShellError:
+                        pass
                     _unlink_optional(temporary_image)
                     return self._record(
                         "degraded",
@@ -481,6 +547,21 @@ class HourlyNotificationPublisher:
         if not _valid_identifier(notification_id) or not isinstance(state, str):
             return self._record(
                 "degraded", bucket, now, reason="Coconut Shell acceptance response was invalid."
+            )
+        try:
+            self._client.report_cycle(
+                bucket=bucket,
+                observed_at=now,
+                outcome="notification_accepted",
+                notification_expected=True,
+            )
+        except CoconutShellError:
+            return self._record(
+                "degraded",
+                bucket,
+                now,
+                notification_id=notification_id,
+                reason="Coconut Shell accepted the notification but not its producer cycle.",
             )
         deadline = time.monotonic() + self.config.terminal_timeout
         while state not in TERMINAL_STATES and time.monotonic() < deadline:
