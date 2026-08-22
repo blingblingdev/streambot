@@ -7,22 +7,16 @@ processes, logs, manifests, or control sockets on its own.
 
 from __future__ import annotations
 
-import base64
 import json
 import hashlib
-import hmac
 import os
 import re
-import ssl
 import stat
+import subprocess
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -32,14 +26,8 @@ MAX_RESPONSE_BYTES = 64 * 1024
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
 MAX_ARTIFACT_METADATA_BYTES = 16 * 1024
 TERMINAL_STATES = {"succeeded", "suppressed", "failed", "ambiguous"}
-KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SOURCE_KEY = "streambot"
-DEFAULT_INSTALLATION_CONFIG = Path.home() / ".amanda" / ".env"
-INSTALLATION_KEYS = {
-    "COCONUT_SHELL_BASE_URL",
-    "COCONUT_SHELL_GLOBAL_KEY",
-    "COCONUT_SHELL_KEY_ID",
-}
+DEFAULT_CLI_PATH = Path.home() / ".local" / "bin" / "coconut-shell"
 
 
 class PublisherConfigurationError(ValueError):
@@ -57,9 +45,7 @@ class SnapshotError(ValueError):
 @dataclass(frozen=True)
 class PublisherConfig:
     enabled: bool = False
-    base_url: str = ""
-    global_key: str = field(default="", repr=False)
-    key_id: str = "local-global"
+    cli_path: Path = DEFAULT_CLI_PATH
     include_snapshot: bool = True
     request_timeout: float = 10.0
     terminal_timeout: float = 180.0
@@ -71,6 +57,7 @@ class PublisherConfig:
     def from_environment(
         cls, installation_config: Path | None = None
     ) -> "PublisherConfig":
+        del installation_config
         enabled = _environment_flag(
             "STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED", False
         )
@@ -79,67 +66,10 @@ class PublisherConfig:
         )
         if not enabled:
             return cls(enabled=False, include_snapshot=include_snapshot)
-        installation = _read_installation_config(
-            installation_config or DEFAULT_INSTALLATION_CONFIG
-        )
-        base_url = os.environ.get(
-            "COCONUT_SHELL_BASE_URL",
-            installation.get("COCONUT_SHELL_BASE_URL", "http://127.0.0.1:18081"),
-        ).strip()
-        global_key = os.environ.get(
-            "COCONUT_SHELL_GLOBAL_KEY",
-            installation.get("COCONUT_SHELL_GLOBAL_KEY", ""),
-        ).strip()
-        key_id = os.environ.get(
-            "COCONUT_SHELL_KEY_ID",
-            installation.get("COCONUT_SHELL_KEY_ID", "local-global"),
-        ).strip()
-        _validate_base_url(base_url)
-        if len(global_key.encode("utf-8")) < 32 or not KEY_ID_PATTERN.fullmatch(key_id):
-            raise PublisherConfigurationError(
-                "Coconut Shell signing configuration is missing or invalid"
-            )
         return cls(
             enabled=True,
-            base_url=base_url.rstrip("/"),
-            global_key=global_key,
-            key_id=key_id,
             include_snapshot=include_snapshot,
         )
-
-
-def _read_installation_config(path: Path) -> dict[str, str]:
-    try:
-        file_stat = path.stat()
-    except FileNotFoundError:
-        return {}
-    except OSError as error:
-        raise PublisherConfigurationError(
-            "Coconut Shell installation configuration cannot be inspected"
-        ) from error
-    if not stat.S_ISREG(file_stat.st_mode) or stat.S_IMODE(file_stat.st_mode) & 0o077:
-        raise PublisherConfigurationError(
-            "Coconut Shell installation configuration must be a private regular file"
-        )
-    values: dict[str, str] = {}
-    try:
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            name = name.strip()
-            if name not in INSTALLATION_KEYS:
-                continue
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-            values[name] = value
-    except (OSError, UnicodeError) as error:
-        raise PublisherConfigurationError(
-            "Coconut Shell installation configuration cannot be read"
-        ) from error
-    return values
 
 
 @dataclass(frozen=True)
@@ -218,24 +148,21 @@ class StreambotNotificationSnapshot:
 
 
 class CoconutShellClient:
-    """Small signed client for the local native-message API."""
+    """Process adapter for the standalone Coconut Shell CLI."""
 
     def __init__(
         self,
         config: PublisherConfig,
         *,
-        opener: Callable[..., Any] | None = None,
+        runner: Callable[..., Any] = subprocess.run,
     ) -> None:
         if not config.enabled:
             raise PublisherConfigurationError("publisher client requires enabled configuration")
-        _validate_base_url(config.base_url)
-        if len(config.global_key.encode("utf-8")) < 32 or not KEY_ID_PATTERN.fullmatch(config.key_id):
-            raise PublisherConfigurationError("publisher client signing configuration is invalid")
-        self._base_url = config.base_url.rstrip("/")
-        self._global_key = config.global_key.encode("utf-8")
-        self._key_id = config.key_id
+        if not config.cli_path.is_absolute():
+            raise PublisherConfigurationError("publisher CLI path must be absolute")
+        self._cli_path = config.cli_path
         self._timeout = config.request_timeout
-        self._opener = opener or urllib.request.urlopen
+        self._runner = runner
 
     def submit(
         self,
@@ -274,8 +201,7 @@ class CoconutShellClient:
         }
         if images:
             message = _attach_images(message, tuple(images))
-        body = json.dumps(
-            {
+        payload = {
                 "contract": "native-feishu-v1",
                 "source": SOURCE_KEY,
                 "type": type_key,
@@ -285,23 +211,26 @@ class CoconutShellClient:
                 "message": message,
                 "images": images,
                 "tasks": [],
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
+            }
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(body) > 64 * 1024:
             raise CoconutShellError("notification event is too large")
-        return self._request(
-            "POST", "/api/v1/notifications", body, "application/json; charset=utf-8"
-        )
+        result = self._run("publish", payload)
+        if result.get("kind") != "notification" or not isinstance(result.get("notification_id"), str):
+            raise CoconutShellError("Coconut Shell response is invalid")
+        return {"id": result["notification_id"], "state": result.get("state")}
 
     def status(self, notification_id: str) -> dict[str, Any]:
         if not _valid_identifier(notification_id):
             raise CoconutShellError("Coconut Shell notification identifier is invalid")
-        path = "/api/v1/notifications/" + urllib.parse.quote(notification_id, safe="")
-        return self._request("GET", path, None, None)
+        result = self._run("status", None, notification_id)
+        if result.get("kind") != "notification":
+            raise CoconutShellError("Coconut Shell response is invalid")
+        return {"id": result.get("notification_id", notification_id), "state": result.get("state")}
 
     def heartbeat(self, _publisher_status: dict[str, Any]) -> dict[str, Any]:
-        return self._request("GET", "/api/v1/healthz", None, None)
+        result = self._run("--version", None)
+        return {"status": "accepted", "revision": result.get("version", "")}
 
     def report_cycle(
         self,
@@ -316,8 +245,7 @@ class CoconutShellClient:
             raise CoconutShellError("producer cycle outcome is invalid")
         observed_at = observed_at.astimezone(timezone.utc)
         next_hour = observed_at.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        body = json.dumps(
-            {
+        payload = {
                 "source": SOURCE_KEY,
                 "type": TYPE_KEY,
                 "cycle_key": bucket,
@@ -328,62 +256,36 @@ class CoconutShellClient:
                 "grace_seconds": 5 * 60,
                 "notification_idempotency_key": bucket if notification_expected else "",
                 "failure_code": failure_code,
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return self._request(
-            "POST",
-            "/api/v1/producer-cycles",
-            body,
-            "application/json; charset=utf-8",
-        )
+            }
+        result = self._run("cycle", payload)
+        if result.get("kind") != "cycle" or result.get("state") != "accepted":
+            raise CoconutShellError("Coconut Shell response is invalid")
+        return {"id": result.get("cycle_id", ""), "replayed": bool(result.get("replayed"))}
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        body: bytes | None,
-        content_type: str | None,
-    ) -> dict[str, Any]:
-        encoded_body = body or b""
-        timestamp = int(time.time())
-        nonce = str(uuid.uuid4())
-        signature = _sign_request(self._global_key, method, path, timestamp, nonce, encoded_body)
-        request = urllib.request.Request(
-            self._base_url + path,
-            data=body,
-            method=method,
-            headers={
-                "Accept": "application/json",
-                "X-Coconut-Key-Id": self._key_id,
-                "X-Coconut-Timestamp": str(timestamp),
-                "X-Coconut-Nonce": nonce,
-                "X-Coconut-Signature": signature,
-            },
-        )
-        if content_type:
-            request.add_header("Content-Type", content_type)
+    def _run(self, command: str, payload: dict[str, Any] | None, argument: str | None = None) -> dict[str, Any]:
+        arguments = [str(self._cli_path), command]
+        if argument is not None:
+            arguments.append(argument)
+        if command not in {"--version", "status"}:
+            arguments.append("--quiet")
         try:
-            with self._opener(request, timeout=self._timeout) as response:
-                status = getattr(response, "status", 200)
-                data = response.read(MAX_RESPONSE_BYTES + 1)
-        except urllib.error.HTTPError as error:
-            raise CoconutShellError(
-                f"Coconut Shell request failed with HTTP {error.code}"
-            ) from None
-        except (urllib.error.URLError, TimeoutError, OSError, ssl.SSLError):
-            raise CoconutShellError("Coconut Shell request did not confirm a response") from None
-        if status < 200 or status >= 300:
-            raise CoconutShellError(
-                f"Coconut Shell request failed with HTTP {status}"
+            completed = self._runner(
+                arguments,
+                input=json.dumps(payload, separators=(",", ":")) if payload is not None else None,
+                text=True,
+                capture_output=True,
+                timeout=max(self._timeout, 1.0) + 180.0,
+                check=False,
             )
-        if len(data) > MAX_RESPONSE_BYTES:
+        except (OSError, subprocess.SubprocessError):
+            raise CoconutShellError("Coconut Shell request did not confirm a response") from None
+        if len(completed.stdout.encode("utf-8")) > MAX_RESPONSE_BYTES:
             raise CoconutShellError("Coconut Shell response is too large")
         try:
-            decoded = json.loads(data)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = json.loads(completed.stdout)
+        except json.JSONDecodeError:
             raise CoconutShellError("Coconut Shell response is invalid") from None
-        if not isinstance(decoded, dict):
+        if completed.returncode != 0 or not isinstance(decoded, dict) or decoded.get("ok") is not True:
             raise CoconutShellError("Coconut Shell response is invalid")
         return decoded
 
@@ -986,25 +888,6 @@ def _environment_flag(name: str, fallback: bool) -> bool:
     raise PublisherConfigurationError(f"{name} must be a boolean")
 
 
-def _validate_base_url(value: str) -> None:
-    parsed = urllib.parse.urlsplit(value)
-    is_loopback_http = parsed.scheme == "http" and parsed.hostname in {
-        "127.0.0.1",
-        "localhost",
-        "::1",
-    }
-    if (
-        not value
-        or (parsed.scheme != "https" and not is_loopback_http)
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise PublisherConfigurationError("Coconut Shell base URL is invalid")
-
-
 def _valid_text(value: Any, limit: int) -> bool:
     return (
         isinstance(value, str)
@@ -1043,15 +926,6 @@ def _read_regular_file(path: Path, limit: int) -> bytes:
         return contents
     finally:
         os.close(descriptor)
-
-
-def _sign_request(key: bytes, method: str, path: str, timestamp: int, nonce: str, body: bytes) -> str:
-    digest = hashlib.sha256(body).hexdigest()
-    canonical = f"COCONUT-SHELL-HMAC-V1\n{method}\n{path}\n{timestamp}\n{nonce}\n{digest}\n".encode()
-    signature = base64.urlsafe_b64encode(
-        hmac.new(key, canonical, hashlib.sha256).digest()
-    ).rstrip(b"=")
-    return "v1=" + signature.decode("ascii")
 
 
 def _image_descriptor(path: Path) -> dict[str, str]:

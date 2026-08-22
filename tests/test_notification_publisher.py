@@ -7,7 +7,6 @@ import os
 import sys
 import threading
 import unittest
-import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -26,7 +25,6 @@ from streambot.notification_publisher import (  # noqa: E402
     SnapshotError,
     StreambotNotificationSnapshot,
     _message_for,
-    _sign_request,
 )
 
 NOW = datetime(2026, 8, 19, 10, 23, 45, tzinfo=timezone.utc)
@@ -92,75 +90,15 @@ class PublisherConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             config = PublisherConfig.from_environment()
         self.assertFalse(config.enabled)
-        self.assertEqual(config.global_key, "")
 
-    def test_enabled_configuration_requires_safe_transport_and_signing_key(self) -> None:
+    def test_enabled_configuration_uses_only_the_absolute_cli(self) -> None:
         values = {
             "STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED": "true",
-            "COCONUT_SHELL_BASE_URL": "https://coconut.example.test",
-            "COCONUT_SHELL_GLOBAL_KEY": "x" * 32,
         }
         with mock.patch.dict(os.environ, values, clear=True):
             config = PublisherConfig.from_environment()
         self.assertTrue(config.enabled)
-        self.assertNotIn("x" * 43, repr(config))
-
-        values["COCONUT_SHELL_BASE_URL"] = "http://remote.example.test"
-        with mock.patch.dict(os.environ, values, clear=True):
-            with self.assertRaises(PublisherConfigurationError):
-                PublisherConfig.from_environment()
-
-    def test_enabled_configuration_reads_only_private_installation_values(self) -> None:
-        with TemporaryDirectory() as directory:
-            config_path = Path(directory) / ".env"
-            config_path.write_text(
-                "COCONUT_SHELL_BASE_URL=http://127.0.0.1:18081\n"
-                f"COCONUT_SHELL_GLOBAL_KEY={'z' * 32}\n"
-                "COCONUT_SHELL_KEY_ID=local-global\n"
-                "FEISHU_APP_SECRET=must-not-be-loaded\n",
-                encoding="utf-8",
-            )
-            config_path.chmod(0o600)
-            with mock.patch.dict(
-                os.environ,
-                {"STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED": "true"},
-                clear=True,
-            ):
-                config = PublisherConfig.from_environment(config_path)
-        self.assertTrue(config.enabled)
-        self.assertEqual(config.base_url, "http://127.0.0.1:18081")
-        self.assertEqual(config.key_id, "local-global")
-
-    def test_enabled_configuration_rejects_public_installation_file(self) -> None:
-        with TemporaryDirectory() as directory:
-            config_path = Path(directory) / ".env"
-            config_path.write_text(
-                f"COCONUT_SHELL_GLOBAL_KEY={'z' * 32}\n", encoding="utf-8"
-            )
-            config_path.chmod(0o644)
-            with mock.patch.dict(
-                os.environ,
-                {"STREAMBOT_COCONUT_SHELL_PUBLISHER_ENABLED": "true"},
-                clear=True,
-            ):
-                with self.assertRaises(PublisherConfigurationError):
-                    PublisherConfig.from_environment(config_path)
-
-
-class SigningTests(unittest.TestCase):
-    def test_signing_matches_the_native_contract_vector(self) -> None:
-        signature = _sign_request(
-            b"0123456789abcdef0123456789abcdef",
-            "POST",
-            "/api/v1/notifications",
-            1_787_205_600,
-            "550e8400-e29b-41d4-a716-446655440000",
-            b'{"contract":"native-feishu-v1"}',
-        )
-        self.assertEqual(
-            signature,
-            "v1=YypB6wtcGh36rFsGTXnDvDU266K83NR86aohJl0z5vk",
-        )
+        self.assertTrue(config.cli_path.is_absolute())
 
 
 class SnapshotTests(unittest.TestCase):
@@ -201,73 +139,63 @@ class SnapshotTests(unittest.TestCase):
 
 class CoconutShellClientTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.requests = []
+        self.calls = []
 
-        def opener(request, timeout):
-            self.requests.append((request, timeout))
-            if request.full_url.endswith("/api/v1/notifications"):
-                return Response({"id": "event-1", "state": "pending"}, 202)
-            return Response({"id": "event-1", "state": "succeeded"})
+        def runner(arguments, **options):
+            self.calls.append((arguments, options))
+            kind = "cycle" if "cycle" in arguments else "cli" if "--version" in arguments else "notification"
+            payload = {"ok": True, "kind": kind, "state": "accepted" if kind == "cycle" else "succeeded"}
+            if kind == "notification":
+                payload["notification_id"] = "event-1"
+            if kind == "cli":
+                payload["version"] = "test-revision"
+            return mock.Mock(returncode=0, stdout=json.dumps(payload), stderr="")
 
-        self.config = PublisherConfig(
-            enabled=True,
-            base_url="https://coconut.example.test",
-            global_key="x" * 32,
-        )
-        self.client = CoconutShellClient(self.config, opener=opener)
+        self.config = PublisherConfig(enabled=True)
+        self.client = CoconutShellClient(self.config, runner=runner)
 
-    def test_client_signs_and_submits_the_exact_native_contract(self) -> None:
+    def test_client_submits_the_exact_native_contract_through_cli(self) -> None:
         with TemporaryDirectory() as directory:
             image = Path(directory) / "snapshot.jpg"
             image.write_bytes(b"\xff\xd8\xfffixture")
             accepted = self.client.submit(snapshot(), "hour:2026-08-19T10", [image])
         terminal = self.client.status(accepted["id"])
         self.assertEqual(terminal["state"], "succeeded")
-        notification_request = self.requests[0][0]
-        payload = json.loads(notification_request.data)
+        arguments, options = self.calls[0]
+        payload = json.loads(options["input"])
+        self.assertEqual(arguments[:2], [str(self.config.cli_path), "publish"])
         self.assertEqual(payload["contract"], "native-feishu-v1")
         self.assertEqual(payload["source"], "streambot")
         self.assertEqual(payload["type"], "streambot.hourly_status")
         self.assertEqual(payload["idempotency_key"], "hour:2026-08-19T10")
         self.assertEqual(payload["message"]["msg_type"], "interactive")
         self.assertEqual(list(payload["images"]), ["image_1"])
-        self.assertEqual(notification_request.get_header("X-coconut-key-id"), "local-global")
-        self.assertRegex(
-            notification_request.get_header("X-coconut-signature"),
-            r"^v1=[A-Za-z0-9_-]{43}$",
-        )
 
-    def test_client_reports_a_signed_hourly_cycle(self) -> None:
+    def test_client_reports_an_hourly_cycle_through_cli(self) -> None:
         self.client.report_cycle(
             bucket="hour:2026-08-19T10",
             observed_at=NOW,
             outcome="silent",
         )
 
-        request = self.requests[0][0]
-        self.assertTrue(request.full_url.endswith("/api/v1/producer-cycles"))
-        payload = json.loads(request.data)
+        arguments, options = self.calls[0]
+        self.assertEqual(arguments[:2], [str(self.config.cli_path), "cycle"])
+        payload = json.loads(options["input"])
         self.assertEqual(payload["source"], "streambot")
         self.assertEqual(payload["type"], "streambot.hourly_status")
         self.assertEqual(payload["cycle_key"], "hour:2026-08-19T10")
         self.assertEqual(payload["outcome"], "silent")
         self.assertEqual(payload["expected_next_at"], "2026-08-19T11:00:00Z")
-        self.assertRegex(
-            request.get_header("X-coconut-signature"),
-            r"^v1=[A-Za-z0-9_-]{43}$",
-        )
 
-    def test_client_errors_never_include_response_or_credentials(self) -> None:
-        def failing(_request, timeout):
-            self.assertEqual(timeout, self.config.request_timeout)
-            raise urllib.error.URLError("private network detail")
+    def test_client_errors_never_include_process_detail(self) -> None:
+        def failing(_arguments, **_options):
+            raise OSError("private network detail")
 
-        client = CoconutShellClient(self.config, opener=failing)
+        client = CoconutShellClient(self.config, runner=failing)
         with self.assertRaises(CoconutShellError) as raised:
             client.submit(snapshot(), "hour:2026-08-19T10", [])
         message = str(raised.exception)
         self.assertNotIn("private", message)
-        self.assertNotIn(self.config.global_key, message)
 
     def test_every_streambot_type_builds_its_native_card(self) -> None:
         fixtures = {
@@ -323,8 +251,6 @@ class HourlyPublisherTests(unittest.TestCase):
     def config(self) -> PublisherConfig:
         return PublisherConfig(
             enabled=True,
-            base_url="https://coconut.example.test",
-            global_key="x" * 32,
             poll_interval=0.001,
             terminal_timeout=1,
             submit_attempts=2,
@@ -410,8 +336,6 @@ class EventPublisherTests(unittest.TestCase):
     def config(self) -> PublisherConfig:
         return PublisherConfig(
             enabled=True,
-            base_url="https://coconut.example.test",
-            global_key="x" * 32,
             poll_interval=0.001,
             terminal_timeout=1,
             submit_attempts=1,
