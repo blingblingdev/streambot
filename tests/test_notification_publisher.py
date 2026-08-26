@@ -169,7 +169,30 @@ class CoconutShellClientTests(unittest.TestCase):
         self.assertEqual(payload["type"], "streambot.hourly_status")
         self.assertEqual(payload["idempotency_key"], "hour:2026-08-19T10")
         self.assertEqual(payload["message"]["msg_type"], "interactive")
-        self.assertEqual(list(payload["images"]), ["image_1"])
+        self.assertEqual(payload["images"], {"image_1": str(image)})
+
+    def test_client_preserves_the_cli_failure_code(self) -> None:
+        def runner(_arguments, **_options):
+            return mock.Mock(
+                returncode=2,
+                stdout=json.dumps(
+                    {
+                        "ok": False,
+                        "kind": "notification",
+                        "phase": "input",
+                        "state": "not_admitted",
+                        "notification_id": None,
+                        "error": {"code": "invalid_input"},
+                        "next_action": "fix_input",
+                    }
+                ),
+                stderr="",
+            )
+
+        client = CoconutShellClient(self.config, runner=runner)
+        with self.assertRaises(CoconutShellError) as raised:
+            client.submit(snapshot(), "hour:2026-08-19T10", [])
+        self.assertEqual(raised.exception.code, "invalid_input")
 
     def test_client_reports_an_hourly_cycle_through_cli(self) -> None:
         self.client.report_cycle(
@@ -285,6 +308,30 @@ class HourlyPublisherTests(unittest.TestCase):
             ["hour:2026-08-19T10", "hour:2026-08-19T10"],
         )
         self.assertEqual(client.cycles[0]["outcome"], "notification_accepted")
+
+    def test_hourly_loop_never_reuses_the_previous_bucket_after_an_early_wake(self) -> None:
+        observed = []
+        clock = mock.Mock(
+            side_effect=[
+                NOW,
+                datetime(2026, 8, 19, 10, 59, 59, 999999, tzinfo=timezone.utc),
+                datetime(2026, 8, 19, 11, 0, 0, tzinfo=timezone.utc),
+            ]
+        )
+        client = FakeClient()
+        publisher = HourlyNotificationPublisher(
+            self.config(),
+            lambda value: observed.append(value) or snapshot(False),
+            lambda: None,
+            client=client,
+            clock=clock,
+        )
+        publisher._stop.wait = mock.Mock(side_effect=[False, True])
+
+        publisher._run()
+
+        self.assertEqual(observed, [datetime(2026, 8, 19, 11, 0, tzinfo=timezone.utc)])
+        self.assertEqual(client.cycles[0]["bucket"], "hour:2026-08-19T11")
 
     def test_optional_snapshot_failure_does_not_block_text_delivery(self) -> None:
         client = FakeClient()

@@ -8,7 +8,6 @@ processes, logs, manifests, or control sockets on its own.
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
 import stat
@@ -36,6 +35,10 @@ class PublisherConfigurationError(ValueError):
 
 class CoconutShellError(RuntimeError):
     """A secret-safe Coconut Shell request failure."""
+
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class SnapshotError(ValueError):
@@ -195,10 +198,11 @@ class CoconutShellClient:
             raise CoconutShellError("notification event is invalid")
         occurred_at = occurred_at.astimezone(timezone.utc)
         message, title, summary = _message_for(type_key, data, bool(image_paths))
-        images = {
-            f"image_{index + 1}": _image_descriptor(path)
-            for index, path in enumerate(image_paths)
-        }
+        images: dict[str, str] = {}
+        for index, path in enumerate(image_paths):
+            if not path.is_absolute():
+                raise CoconutShellError("notification image path is invalid")
+            images[f"image_{index + 1}"] = str(path)
         if images:
             message = _attach_images(message, tuple(images))
         payload = {
@@ -286,7 +290,12 @@ class CoconutShellClient:
         except json.JSONDecodeError:
             raise CoconutShellError("Coconut Shell response is invalid") from None
         if completed.returncode != 0 or not isinstance(decoded, dict) or decoded.get("ok") is not True:
-            raise CoconutShellError("Coconut Shell response is invalid")
+            code = ""
+            if isinstance(decoded, dict):
+                error = decoded.get("error")
+                if isinstance(error, dict) and _valid_identifier(error.get("code")):
+                    code = error["code"]
+            raise CoconutShellError("Coconut Shell response is invalid", code=code)
         return decoded
 
 
@@ -419,7 +428,7 @@ class HourlyNotificationPublisher:
             try:
                 result = self._client.submit(snapshot, bucket, image_paths)
                 break
-            except CoconutShellError:
+            except CoconutShellError as error:
                 if attempt + 1 == self.config.submit_attempts:
                     try:
                         self._client.report_cycle(
@@ -435,7 +444,9 @@ class HourlyNotificationPublisher:
                         "degraded",
                         bucket,
                         now,
-                        reason="Coconut Shell did not confirm notification acceptance.",
+                        reason=_coconut_shell_failure_reason(
+                            "Coconut Shell did not confirm notification acceptance.", error
+                        ),
                     )
                 if self._stop.wait(min(2**attempt, 4)):
                     _unlink_optional(temporary_image)
@@ -512,7 +523,8 @@ class HourlyNotificationPublisher:
             next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
             if self._stop.wait(max((next_hour - now).total_seconds(), 0.001)):
                 return
-            self.run_once(self._clock())
+            observed_at = self._clock().astimezone(timezone.utc)
+            self.run_once(max(observed_at, next_hour))
 
     def _run_heartbeats(self) -> None:
         while not self._stop.is_set():
@@ -928,13 +940,6 @@ def _read_regular_file(path: Path, limit: int) -> bytes:
         os.close(descriptor)
 
 
-def _image_descriptor(path: Path) -> dict[str, str]:
-    if not path.is_absolute():
-        raise CoconutShellError("notification image path is invalid")
-    contents = _read_regular_file(path, MAX_MEDIA_BYTES)
-    return {"path": str(path), "sha256": hashlib.sha256(contents).hexdigest()}
-
-
 def _write_temporary_image(contents: bytes, content_type: str) -> Path:
     if not contents or len(contents) > MAX_MEDIA_BYTES or content_type not in {"image/jpeg", "image/png"}:
         raise CoconutShellError("notification snapshot is invalid")
@@ -960,6 +965,12 @@ def _unlink_optional(path: Path | None) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _coconut_shell_failure_reason(prefix: str, error: CoconutShellError) -> str:
+    if error.code:
+        return f"{prefix.rstrip('.')} ({error.code})."
+    return prefix
 
 
 def _attach_images(message: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
